@@ -10,33 +10,11 @@ import click
 
 from .plan_parser import ResourceChange
 
-# Attributes that are safe to auto-sync from state.
-# Omit computed-only / identity fields that should never appear in config.
-DRIFTABLE_ATTRS = {
-    "allow_auto_merge",
-    "allow_merge_commit",
-    "allow_rebase_merge",
-    "allow_squash_merge",
-    "allow_update_branch",
-    "archived",
-    "delete_branch_on_merge",
-    "description",
-    "has_discussions",
-    "has_downloads",
-    "has_issues",
-    "has_projects",
-    "has_wiki",
-    "homepage_url",
-    "is_template",
-    "merge_commit_message",
-    "merge_commit_title",
-    "squash_merge_commit_message",
-    "squash_merge_commit_title",
-    "topics",
-    "visibility",
-    "vulnerability_alerts",
-    "web_commit_signoff_required",
-}
+# No hardcoded attribute lists needed.
+# Drifted attributes are derived directly from the plan JSON by comparing
+# change.before (live infra) vs change.after (what config wants). Computed
+# fields (id, node_id, etc.) have the same value in both, so they never
+# appear as drift. after_unknown=true attrs are skipped (not yet computed).
 
 
 class ConfigEditor:
@@ -126,24 +104,32 @@ class ConfigEditor:
         #    tofu show -json (no plan file) only reflects local state, not live
         #    infra — so attributes changed directly in GitHub would be missed.
         click.echo(f"    Running plan to capture live infrastructure values...")
-        actual_data = self._get_resource_actual_values(resource)
-        if actual_data is None:
+        result = self._get_resource_actual_values(resource)
+        if result is None:
             click.echo(f"    ❌ Could not read plan — aborting")
             return False
+        actual_data, sensitive_keys = result
         if not actual_data:
             click.echo(f"    ❌ Address '{resource.address}' not found in plan changes")
             return False
 
         if self.verbose:
-            click.echo(f"    Actual (before) keys: {sorted(actual_data.keys())}")
+            click.echo(f"    Drifted attrs from plan: {sorted(actual_data.keys())}")
+            if sensitive_keys:
+                click.echo(f"    Sensitive keys (will skip): {sorted(sensitive_keys)}")
 
-        # 2. Filter to driftable attributes only
-        to_sync = {k: v for k, v in actual_data.items() if k in DRIFTABLE_ATTRS}
+        # 2. actual_data already contains ONLY the attributes that differ between
+        #    live infra and config (before != after, after_unknown=false).
+        #    Still filter out anything OpenTofu marked sensitive.
+        to_sync = {
+            k: v for k, v in actual_data.items()
+            if k not in sensitive_keys
+        }
         if self.verbose:
-            click.echo(f"    Driftable attributes to sync: {sorted(to_sync.keys())}")
+            click.echo(f"    Attributes to sync: {sorted(to_sync.keys())}")
 
         if not to_sync:
-            click.echo(f"    No driftable attributes found for {resource.address}")
+            click.echo(f"    No syncable attributes found for {resource.address}")
             return False
 
         # 3. Compute which attributes actually differ from the config
@@ -161,11 +147,16 @@ class ConfigEditor:
     # Fetch actual infrastructure values via plan before-state
     # ------------------------------------------------------------------
 
-    def _get_resource_actual_values(self, resource: ResourceChange) -> Optional[Dict[str, Any]]:
+    def _get_resource_actual_values(self, resource: ResourceChange
+                                     ) -> Optional[tuple[Dict[str, Any], set]]:
         """
-        Run `tofu plan -out=<tmp>` then `tofu show -json <tmp>` to read
-        resource_changes[].change.before — the ACTUAL values in live
-        infrastructure, not just what is recorded in local state.
+        Run `tofu plan -out=<tmp>` then `tofu show -json <tmp>` and compare
+        change.before (live infra) vs change.after (desired from config) to
+        find ONLY the attributes that are actually drifting.
+        Skips attrs where after_unknown=true (computed post-apply).
+        Also reads change.before_sensitive and returns sensitive attr names.
+        Returns (drifted_before_values, sensitive_attr_names) or None on error.
+        Returns ({}, set()) when the resource address is not in plan changes.
         """
         import tempfile
         original_cwd = Path.cwd()
@@ -204,19 +195,38 @@ class ConfigEditor:
 
             for rc in resource_changes:
                 if rc.get("address") == resource.address:
-                    before = rc.get("change", {}).get("before") or {}
+                    change = rc.get("change", {})
+                    before = change.get("before") or {}
+                    after = change.get("after") or {}
+                    after_unknown = change.get("after_unknown") or {}
+                    # before_sensitive mirrors before's structure with True where sensitive
+                    before_sensitive = change.get("before_sensitive") or {}
+                    sensitive_keys = {
+                        k for k, v in before_sensitive.items()
+                        if v is True or (isinstance(v, dict) and v)
+                    }
+                    # Only return attrs that are actually drifting:
+                    # before != after, and not computed post-apply
+                    drifted = {
+                        k: before[k]
+                        for k in before
+                        if before[k] != after.get(k)
+                        and not after_unknown.get(k)
+                    }
                     if self.verbose:
-                        click.echo(f"      before keys: {sorted(before.keys())}")
-                    return before
+                        click.echo(f"      Drifted attrs (before != after): {sorted(drifted.keys())}")
+                        if sensitive_keys:
+                            click.echo(f"      sensitive keys: {sorted(sensitive_keys)}")
+                    return drifted, sensitive_keys
 
-            return {}  # not found in plan changes
+            return {}, set()  # not found in plan changes
 
         except Exception as e:
             click.echo(f"      ❌ Exception reading plan: {e}")
             if self.verbose:
                 import traceback
                 traceback.print_exc()
-            return None
+            return None  # None signals a hard error (distinct from empty tuple)
         finally:
             os.chdir(original_cwd)
             if plan_file:

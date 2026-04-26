@@ -7,7 +7,6 @@ requires-python = ">=3.12"
 dependencies = [
     "tfparse>=0.6.0",
     "click>=8.0.0",
-    "subprocess32; python_version < '3.0'"
 ]
 
 [project.scripts]
