@@ -35,26 +35,49 @@ class FileAnalyzer:
             Dict[str, List[ResourceChange]]: Mapping of file paths to resources they contain.
         """
         file_resources_map = {}
-        
-        # Get all .tf files in the project
         tf_files = self._get_terraform_files()
-        
+
         if self.verbose:
             click.echo(f"Analyzing {len(tf_files)} Terraform files...")
-            
+
+        # tfparse requires a directory path, so parse each unique parent dir once
+        # to validate which resource addresses actually exist in the config.
+        known_addresses: set = set()
+        parsed_dirs: set = set()
         for tf_file in tf_files:
+            parent = tf_file.parent
+            if parent in parsed_dirs:
+                continue
+            parsed_dirs.add(parent)
             try:
-                resources_in_file = self._analyze_file(tf_file, changed_resources)
-                if resources_in_file:
-                    file_resources_map[str(tf_file)] = resources_in_file
-                    if self.verbose:
-                        click.echo(f"  {tf_file.name}: {len(resources_in_file)} matching resources")
-                        
+                parsed = tfparse.load_from_path(str(parent))
+                if hasattr(parsed, 'resource') and parsed.resource:
+                    for resource_type, resources in parsed.resource.items():
+                        for resource_name in resources.keys():
+                            known_addresses.add(f"{resource_type}.{resource_name}")
             except Exception as e:
                 if self.verbose:
-                    click.echo(f"  Warning: Could not analyze {tf_file}: {e}")
-                continue
-                
+                    click.echo(f"  tfparse warning for {parent}: {e}")
+
+        if self.verbose and known_addresses:
+            click.echo(f"  tfparse found {len(known_addresses)} resource(s) in config")
+
+        # Use text search to map each changed resource to its specific file.
+        # Filter against known_addresses when tfparse succeeded; fall back to
+        # all changed_resources when it didn't find anything (e.g. parse error).
+        resources_to_locate = (
+            [r for r in changed_resources if r.address in known_addresses]
+            if known_addresses
+            else changed_resources
+        )
+
+        for tf_file in tf_files:
+            resources_in_file = self._fallback_text_search(tf_file, resources_to_locate)
+            if resources_in_file:
+                file_resources_map[str(tf_file)] = resources_in_file
+                if self.verbose:
+                    click.echo(f"  {tf_file.name}: {len(resources_in_file)} matching resources")
+
         return file_resources_map
         
     def _get_terraform_files(self) -> List[Path]:
@@ -75,45 +98,6 @@ class FileAnalyzer:
             
         return tf_files
         
-    def _analyze_file(self, tf_file: Path, changed_resources: List[ResourceChange]) -> List[ResourceChange]:
-        """
-        Analyze a single Terraform file to find matching resources.
-        
-        Args:
-            tf_file: Path to the Terraform file.
-            changed_resources: List of resources to look for.
-            
-        Returns:
-            List[ResourceChange]: Resources found in this file.
-        """
-        try:
-            # Parse the Terraform file using tfparse
-            parsed = tfparse.load_from_path(str(tf_file))
-            
-            resources_in_file = []
-            
-            # Check if the file has resources
-            if not hasattr(parsed, 'resource') or not parsed.resource:
-                return resources_in_file
-                
-            # Iterate through resources in the parsed file
-            for resource_type, resources in parsed.resource.items():
-                for resource_name in resources.keys():
-                    resource_address = f"{resource_type}.{resource_name}"
-                    
-                    # Check if this resource matches any of our changed resources
-                    for changed_resource in changed_resources:
-                        if self._resource_matches(changed_resource, resource_type, resource_name, resource_address):
-                            resources_in_file.append(changed_resource)
-                            
-            return resources_in_file
-            
-        except Exception as e:
-            # If tfparse fails, try a simple text-based search as fallback
-            if self.verbose:
-                click.echo(f"    tfparse failed for {tf_file}, falling back to text search: {e}")
-            return self._fallback_text_search(tf_file, changed_resources)
-            
     def _resource_matches(self, changed_resource: ResourceChange, 
                          file_resource_type: str, file_resource_name: str, 
                          file_resource_address: str) -> bool:
@@ -191,27 +175,25 @@ class FileAnalyzer:
             'files': [],
             'total_resources': 0
         }
-        
+
         for tf_file in tf_files:
             try:
-                parsed = tfparse.load_from_path(str(tf_file))
-                resource_count = 0
-                
-                if hasattr(parsed, 'resource') and parsed.resource:
-                    for resource_type, resources in parsed.resource.items():
-                        resource_count += len(resources)
-                        
+                # Count resource blocks via text search (tfparse needs a directory,
+                # so per-file counting is done with a simple regex here)
+                content = tf_file.read_text()
+                resource_count = len(re.findall(r'^\s*resource\s+"', content, re.MULTILINE))
+
                 structure['files'].append({
                     'path': str(tf_file.relative_to(self.project_path)),
                     'resource_count': resource_count
                 })
                 structure['total_resources'] += resource_count
-                
+
             except Exception:
                 structure['files'].append({
                     'path': str(tf_file.relative_to(self.project_path)),
                     'resource_count': 0,
                     'error': 'Could not parse file'
                 })
-                
+
         return structure
