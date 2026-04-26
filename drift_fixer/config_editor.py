@@ -289,17 +289,17 @@ class ConfigEditor:
         for attr, value in diffs.items():
             address = f"{base_address}.{attr}"
             if _is_block_value(value):
-                # Block-type: use recursive block sync instead of attribute set
-                items = value if isinstance(value, list) else [value]
-                for i, block_data in enumerate(items):
-                    if not isinstance(block_data, dict):
-                        continue
-                    label = f"[{i}]" if len(items) > 1 else ""
-                    if self._sync_block(file_path, address, block_data):
-                        click.echo(f"      ✅ Synced block {attr}{label}")
-                        any_changed = True
-                    else:
-                        click.echo(f"      ⚠️  Block '{attr}{label}' unchanged or failed")
+                # Block-type: use recursive block sync instead of attribute set.
+                # Lists of dicts = repeated blocks (e.g. rules{}, conditions{}).
+                # Sync only the first dict item — providers typically allow one.
+                items = [v for v in (value if isinstance(value, list) else [value]) if isinstance(v, dict)]
+                if not items:
+                    continue
+                if self._sync_block(file_path, address, items[0]):
+                    click.echo(f"      ✅ Synced block {attr}")
+                    any_changed = True
+                else:
+                    click.echo(f"      ⚠️  Block '{attr}' unchanged or failed")
             else:
                 hcl_value = _to_hcl_value(value)
                 existing = self._hcledit_get(file_path, address)
@@ -324,14 +324,20 @@ class ConfigEditor:
         Ensure a block exists at block_address and sync its scalar attributes.
         Nested blocks are handled recursively.
         """
-        # Create the block if it doesn't already exist
+        # Create the block if it doesn't already exist.
+        # Must use `block append <parent> <child_type>` — NOT `block new <full.address>`
+        # because block new treats the dotted address as labels on a new top-level block.
         if not self._hcledit_block_exists(file_path, block_address):
             if self.verbose:
                 click.echo(f"        Creating block: {block_address}")
-            cmd = ["hcledit", "block", "new", block_address, "-f", file_path, "-u"]
+            if "." not in block_address:
+                click.echo(f"        ❌ Cannot append top-level block: {block_address}")
+                return False
+            parent_address, child_type = block_address.rsplit(".", 1)
+            cmd = ["hcledit", "block", "append", parent_address, child_type, "-f", file_path, "-u"]
             result = subprocess.run(cmd, capture_output=True, text=True, check=False)
             if result.returncode != 0:
-                click.echo(f"        ❌ block new failed: {result.stderr.strip()}")
+                click.echo(f"        ❌ block append failed: {result.stderr.strip()}")
                 return False
 
         any_changed = False
@@ -344,8 +350,8 @@ class ConfigEditor:
                         if self._sync_block(file_path, child_address, block_item):
                             any_changed = True
             else:
-                if value is None:
-                    continue  # omit null/unset optional attrs from blocks
+                if value is None or value == []:
+                    continue  # omit null/empty-list values — defaults, not real attrs
                 hcl_value = _to_hcl_value(value)
                 existing = self._hcledit_get(file_path, child_address)
                 if existing is not None:
@@ -364,10 +370,10 @@ class ConfigEditor:
         return any_changed
 
     def _hcledit_block_exists(self, file_path: str, address: str) -> bool:
-        """Check if a block exists using `hcledit block list`."""
-        cmd = ["hcledit", "block", "list", "-f", file_path]
+        """Check if a block exists using `hcledit block get` (returns empty output when absent)."""
+        cmd = ["hcledit", "block", "get", address, "-f", file_path]
         result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        return address in result.stdout.splitlines()
+        return bool(result.stdout.strip())
 
     def _hcledit_set(self, file_path: str, address: str, hcl_value: str) -> bool:
         """hcledit attribute set <address> <value> -f <file> -u"""
