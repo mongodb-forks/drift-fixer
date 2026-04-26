@@ -53,5 +53,7 @@ resource "github_repository" "drift_test" {
   topics                      = []
   visibility                  = "private"
   web_commit_signoff_required = false
+  has_downloads               = false
+  vulnerability_alerts        = null
 }
 
