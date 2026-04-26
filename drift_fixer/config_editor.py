@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -94,8 +95,11 @@ class ConfigEditor:
         return file_updated
 
     def _sync_resource(self, file_path: str, resource: ResourceChange) -> bool:
-        # Always use absolute path so hcledit works regardless of cwd
-        file_path = str(Path(file_path).resolve())
+        # Always use absolute path so hcledit works regardless of cwd.
+        # Use abspath (not resolve) to avoid following symlinks on WSL where
+        # /home/trevor/... may be a symlink to /mnt/c/... causing edits to
+        # the wrong file copy.
+        file_path = os.path.abspath(file_path)
         if self.dry_run:
             click.echo(f"    [DRY RUN] Would sync {resource.address}")
             return True
@@ -325,19 +329,16 @@ class ConfigEditor:
         Nested blocks are handled recursively.
         """
         # Create the block if it doesn't already exist.
-        # Must use `block append <parent> <child_type>` — NOT `block new <full.address>`
-        # because block new treats the dotted address as labels on a new top-level block.
+        # hcledit block append only works for DIRECT children of a top-level block;
+        # it silently does nothing for deeper nesting. Use text insertion instead.
         if not self._hcledit_block_exists(file_path, block_address):
             if self.verbose:
                 click.echo(f"        Creating block: {block_address}")
             if "." not in block_address:
-                click.echo(f"        ❌ Cannot append top-level block: {block_address}")
+                click.echo(f"        ❌ Cannot create top-level block: {block_address}")
                 return False
             parent_address, child_type = block_address.rsplit(".", 1)
-            cmd = ["hcledit", "block", "append", parent_address, child_type, "-f", file_path, "-u"]
-            result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-            if result.returncode != 0:
-                click.echo(f"        ❌ block append failed: {result.stderr.strip()}")
+            if not self._insert_child_block(file_path, parent_address, child_type):
                 return False
 
         any_changed = False
@@ -374,6 +375,73 @@ class ConfigEditor:
         cmd = ["hcledit", "block", "get", address, "-f", file_path]
         result = subprocess.run(cmd, capture_output=True, text=True, check=False)
         return bool(result.stdout.strip())
+
+    def _insert_child_block(self, file_path: str, parent_address: str, child_type: str) -> bool:
+        """
+        Insert an empty `child_type {}` block inside the parent block by text manipulation.
+        hcledit block append silently no-ops for nested (depth > 1) blocks, so we locate
+        the parent block by its address segments, find its closing brace via brace counting,
+        and insert the new child block before it.
+        """
+        # The parent_address is like resource.github_repository_ruleset.ruleset_15577636.rules
+        # Split into the top-level block labels (resource type+name) and the nested chain
+        # e.g. segments = ['resource', 'github_repository_ruleset', 'ruleset_15577636', 'rules']
+        segments = parent_address.split(".")
+
+        with open(file_path, "r") as f:
+            content = f.read()
+
+        # Find the position of the innermost block by walking the segment path
+        pos = 0
+        seg_idx = 0
+        while seg_idx < len(segments):
+            seg = segments[seg_idx]
+            # Look for `seg {` or `seg "next" {` or `seg "next" "next2" {` in the file
+            # Simple heuristic: find `seg` followed (possibly with labels) by `{` on the same line
+            # Match: whitespace + segment name + optional labels + optional space + {
+            # For blocks like `resource "type" "name" {` consume 3 segments at once
+            if seg == "resource" and seg_idx + 2 < len(segments):
+                block_type = segments[seg_idx + 1]
+                block_name = segments[seg_idx + 2]
+                pattern = re.compile(
+                    r'(?m)^[ \t]*resource\s+"' + re.escape(block_type) + r'"\s+"' + re.escape(block_name) + r'"\s*\{'
+                )
+                seg_idx += 3
+            else:
+                pattern = re.compile(r'(?m)^[ \t]*' + re.escape(seg) + r'\s*(?:"[^"]*"\s*)*\{')
+                seg_idx += 1
+
+            m = pattern.search(content, pos)
+            if not m:
+                click.echo(f"        ❌ Could not locate block segment '{seg}' in file")
+                return False
+            # Find the opening brace and walk to the matching closing brace
+            brace_pos = content.index("{", m.start()) + 1
+            depth = 1
+            i = brace_pos
+            while i < len(content) and depth > 0:
+                if content[i] == "{":
+                    depth += 1
+                elif content[i] == "}":
+                    depth -= 1
+                i += 1
+            block_end = i - 1  # position of the closing `}`
+            pos = brace_pos    # next search starts inside current block
+
+        # Determine indentation from the line just before block_end
+        line_start = content.rfind("\n", 0, block_end)
+        closing_line = content[line_start + 1:block_end]
+        indent = " " * (len(closing_line) - len(closing_line.lstrip()) + 2)
+
+        new_block = f"\n{indent}{child_type} {{\n{indent}}}"
+        new_content = content[:block_end] + new_block + "\n" + content[block_end:]
+
+        with open(file_path, "w") as f:
+            f.write(new_content)
+
+        if self.verbose:
+            click.echo(f"        Inserted empty '{child_type}' block into '{parent_address}'")
+        return True
 
     def _hcledit_set(self, file_path: str, address: str, hcl_value: str) -> bool:
         """hcledit attribute set <address> <value> -f <file> -u"""
