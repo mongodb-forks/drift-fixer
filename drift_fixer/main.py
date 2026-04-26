@@ -37,7 +37,14 @@ from .git_manager import GitManager
     is_flag=True,
     help='Enable verbose output'
 )
-def cli(path: Path, dry_run: bool, auto_commit: bool, verbose: bool):
+@click.option(
+    '--tf-bin',
+    default='tofu',
+    show_default=True,
+    envvar='DRIFT_FIXER_TF_BIN',
+    help='Path or name of the Terraform/OpenTofu CLI binary to use'
+)
+def cli(path: Path, dry_run: bool, auto_commit: bool, verbose: bool, tf_bin: str):
     """
     Terraform Drift Fixer - Automatically detect and fix configuration drift.
     
@@ -47,9 +54,10 @@ def cli(path: Path, dry_run: bool, auto_commit: bool, verbose: bool):
     """
     if verbose:
         click.echo(f"Starting drift analysis in: {path}")
+        click.echo(f"Using CLI binary: {tf_bin}")
     
     try:
-        fixer = DriftFixer(path, dry_run, auto_commit, verbose)
+        fixer = DriftFixer(path, dry_run, auto_commit, verbose, tf_bin)
         result = fixer.run()
         
         if result:
@@ -70,18 +78,20 @@ def cli(path: Path, dry_run: bool, auto_commit: bool, verbose: bool):
 class DriftFixer:
     """Main orchestrator for the drift fixing process."""
     
-    def __init__(self, project_path: Path, dry_run: bool = False, 
-                 auto_commit: bool = True, verbose: bool = False):
+    def __init__(self, project_path: Path, dry_run: bool = False,
+                 auto_commit: bool = True, verbose: bool = False,
+                 tf_bin: str = 'tofu'):
         self.project_path = project_path
         self.dry_run = dry_run
         self.auto_commit = auto_commit
         self.verbose = verbose
+        self.tf_bin = tf_bin
         
         # Initialize components
-        self.terraform = TerraformRunner(project_path, verbose)
+        self.terraform = TerraformRunner(project_path, verbose, tf_bin)
         self.plan_parser = PlanParser(verbose)
         self.file_analyzer = FileAnalyzer(project_path, verbose)
-        self.config_editor = ConfigEditor(project_path, dry_run, verbose)
+        self.config_editor = ConfigEditor(project_path, dry_run, verbose, tf_bin)
         self.git_manager = GitManager(project_path, verbose)
         
     def run(self) -> bool:

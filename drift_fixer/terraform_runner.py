@@ -11,9 +11,10 @@ import click
 class TerraformRunner:
     """Handles running Terraform CLI commands."""
     
-    def __init__(self, project_path: Path, verbose: bool = False):
+    def __init__(self, project_path: Path, verbose: bool = False, tf_bin: str = 'tofu'):
         self.project_path = project_path
         self.verbose = verbose
+        self.tf_bin = tf_bin
         
     def run_plan(self) -> Optional[List[str]]:
         """
@@ -24,7 +25,7 @@ class TerraformRunner:
         """
         try:
             if self.verbose:
-                click.echo(f"Running terraform plan in {self.project_path}")
+                click.echo(f"Running {self.tf_bin} plan in {self.project_path}")
                 
             # Change to the project directory
             original_cwd = Path.cwd()
@@ -33,7 +34,7 @@ class TerraformRunner:
             try:
                 # Run terraform plan with machine-readable output
                 result = subprocess.run(
-                    ['terraform', 'plan', '-detailed-exitcode', '-no-color'],
+                    [self.tf_bin, 'plan', '-detailed-exitcode', '-no-color'],
                     capture_output=True,
                     text=True,
                     check=False  # Don't raise exception on non-zero exit
@@ -61,7 +62,7 @@ class TerraformRunner:
                 os.chdir(original_cwd)
                 
         except FileNotFoundError:
-            raise RuntimeError("Terraform CLI not found. Please install Terraform.")
+            raise RuntimeError(f"CLI binary '{self.tf_bin}' not found. Install OpenTofu/Terraform or set --tf-bin.")
         except Exception as e:
             raise RuntimeError(f"Failed to run terraform plan: {e}")
             
@@ -74,14 +75,14 @@ class TerraformRunner:
         """
         try:
             if self.verbose:
-                click.echo("Running terraform init...")
+                click.echo(f"Running {self.tf_bin} init...")
                 
             original_cwd = Path.cwd()
             os.chdir(self.project_path)
             
             try:
                 result = subprocess.run(
-                    ['terraform', 'init'],
+                    [self.tf_bin, 'init'],
                     capture_output=True,
                     text=True,
                     check=True
@@ -97,7 +98,7 @@ class TerraformRunner:
         except subprocess.CalledProcessError as e:
             raise RuntimeError(f"Terraform init failed: {e.stderr}")
         except FileNotFoundError:
-            raise RuntimeError("Terraform CLI not found. Please install Terraform.")
+            raise RuntimeError(f"CLI binary '{self.tf_bin}' not found. Install OpenTofu/Terraform or set --tf-bin.")
             
     def validate_terraform_project(self) -> bool:
         """
@@ -115,7 +116,7 @@ class TerraformRunner:
         terraform_dir = self.project_path / ".terraform"
         if not terraform_dir.exists():
             if self.verbose:
-                click.echo("Terraform not initialized. Running terraform init...")
+                click.echo(f"Not initialized. Running {self.tf_bin} init...")
             self.run_init()
             
         return True

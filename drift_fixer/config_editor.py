@@ -14,10 +14,12 @@ from .plan_parser import ResourceChange
 class ConfigEditor:
     """Edit Terraform configuration files using tfedit."""
     
-    def __init__(self, project_path: Path, dry_run: bool = False, verbose: bool = False):
+    def __init__(self, project_path: Path, dry_run: bool = False, verbose: bool = False,
+                 tf_bin: str = 'tofu'):
         self.project_path = project_path
         self.dry_run = dry_run
         self.verbose = verbose
+        self.tf_bin = tf_bin
         
         # Check if tfedit is available
         if not self._check_tfedit_available():
@@ -159,9 +161,9 @@ class ConfigEditor:
             os.chdir(self.project_path)
             
             try:
-                # Use terraform show to get resource state
+                # Use tofu/terraform show to get resource state
                 result = subprocess.run(
-                    ['terraform', 'show', '-json'],
+                    [self.tf_bin, 'show', '-json'],
                     capture_output=True,
                     text=True,
                     check=True
