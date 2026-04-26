@@ -242,6 +242,12 @@ class ConfigEditor:
                        state_attrs: Dict[str, Any]) -> Dict[str, Any]:
         diffs = {}
         for attr, state_val in state_attrs.items():
+            # Block-type values: hcledit attribute get won't work; pass through
+            # and let _sync_block handle idempotency internally.
+            if _is_block_value(state_val):
+                diffs[attr] = state_val
+                continue
+
             address = f"resource.{resource.resource_type}.{resource.resource_name}.{attr}"
             current_val = self._hcledit_get(file_path, address)
 
@@ -279,26 +285,89 @@ class ConfigEditor:
     def _apply_diffs_with_hcledit(self, file_path: str, resource: ResourceChange,
                                    diffs: Dict[str, Any]) -> bool:
         any_changed = False
+        base_address = f"resource.{resource.resource_type}.{resource.resource_name}"
         for attr, value in diffs.items():
-            address = f"resource.{resource.resource_type}.{resource.resource_name}.{attr}"
-            hcl_value = _to_hcl_value(value)
-
-            # Decide: set (attribute exists) or append (attribute missing)
-            existing = self._hcledit_get(file_path, address)
-            if existing is not None:
-                success = self._hcledit_set(file_path, address, hcl_value)
-                verb = "Updated "
+            address = f"{base_address}.{attr}"
+            if _is_block_value(value):
+                # Block-type: use recursive block sync instead of attribute set
+                items = value if isinstance(value, list) else [value]
+                for i, block_data in enumerate(items):
+                    if not isinstance(block_data, dict):
+                        continue
+                    label = f"[{i}]" if len(items) > 1 else ""
+                    if self._sync_block(file_path, address, block_data):
+                        click.echo(f"      ✅ Synced block {attr}{label}")
+                        any_changed = True
+                    else:
+                        click.echo(f"      ⚠️  Block '{attr}{label}' unchanged or failed")
             else:
-                success = self._hcledit_append(file_path, address, hcl_value)
-                verb = "Inserted"
+                hcl_value = _to_hcl_value(value)
+                existing = self._hcledit_get(file_path, address)
+                if existing is not None:
+                    success = self._hcledit_set(file_path, address, hcl_value)
+                    verb = "Updated "
+                else:
+                    success = self._hcledit_append(file_path, address, hcl_value)
+                    verb = "Inserted"
 
-            if success:
-                click.echo(f"      ✅ {verb} {attr} = {hcl_value}")
-                any_changed = True
-            else:
-                click.echo(f"      ❌ Failed to write {attr}")
+                if success:
+                    click.echo(f"      ✅ {verb} {attr} = {hcl_value}")
+                    any_changed = True
+                else:
+                    click.echo(f"      ❌ Failed to write {attr}")
 
         return any_changed
+
+    def _sync_block(self, file_path: str, block_address: str,
+                    block_data: Dict[str, Any]) -> bool:
+        """
+        Ensure a block exists at block_address and sync its scalar attributes.
+        Nested blocks are handled recursively.
+        """
+        # Create the block if it doesn't already exist
+        if not self._hcledit_block_exists(file_path, block_address):
+            if self.verbose:
+                click.echo(f"        Creating block: {block_address}")
+            cmd = ["hcledit", "block", "new", block_address, "-f", file_path, "-u"]
+            result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            if result.returncode != 0:
+                click.echo(f"        ❌ block new failed: {result.stderr.strip()}")
+                return False
+
+        any_changed = False
+        for attr, value in block_data.items():
+            child_address = f"{block_address}.{attr}"
+            if _is_block_value(value):
+                items = value if isinstance(value, list) else [value]
+                for block_item in items:
+                    if isinstance(block_item, dict):
+                        if self._sync_block(file_path, child_address, block_item):
+                            any_changed = True
+            else:
+                if value is None:
+                    continue  # omit null/unset optional attrs from blocks
+                hcl_value = _to_hcl_value(value)
+                existing = self._hcledit_get(file_path, child_address)
+                if existing is not None:
+                    if existing.strip() == hcl_value.strip():
+                        continue  # already correct
+                    success = self._hcledit_set(file_path, child_address, hcl_value)
+                else:
+                    success = self._hcledit_append(file_path, child_address, hcl_value)
+                if success:
+                    if self.verbose:
+                        click.echo(f"        ✅ {attr} = {hcl_value}")
+                    any_changed = True
+                else:
+                    click.echo(f"        ❌ Failed to write {attr} in block {block_address}")
+
+        return any_changed
+
+    def _hcledit_block_exists(self, file_path: str, address: str) -> bool:
+        """Check if a block exists using `hcledit block list`."""
+        cmd = ["hcledit", "block", "list", "-f", file_path]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        return address in result.stdout.splitlines()
 
     def _hcledit_set(self, file_path: str, address: str, hcl_value: str) -> bool:
         """hcledit attribute set <address> <value> -f <file> -u"""
@@ -332,6 +401,13 @@ class ConfigEditor:
 # ------------------------------------------------------------------
 # Value conversion: Python → HCL literal
 # ------------------------------------------------------------------
+
+def _is_block_value(value: Any) -> bool:
+    """Return True if the value should be written as an HCL block rather than an attribute."""
+    return isinstance(value, dict) or (
+        isinstance(value, list) and len(value) > 0 and any(isinstance(v, dict) for v in value)
+    )
+
 
 def _to_hcl_value(value: Any) -> str:
     """Convert a Python value from Terraform state JSON to an HCL literal."""
