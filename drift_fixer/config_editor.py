@@ -122,32 +122,34 @@ class ConfigEditor:
             click.echo(f"    [DRY RUN] Would sync {resource.address}")
             return True
 
-        # 1. Fetch current state
-        click.echo(f"    Fetching state via `{self.tf_bin} show -json`...")
-        state_data = self._get_resource_state(resource)
-        if state_data is None:
-            click.echo(f"    ❌ Could not read state — aborting")
+        # 1. Fetch the ACTUAL infrastructure values from the plan before-state.
+        #    tofu show -json (no plan file) only reflects local state, not live
+        #    infra — so attributes changed directly in GitHub would be missed.
+        click.echo(f"    Running plan to capture live infrastructure values...")
+        actual_data = self._get_resource_actual_values(resource)
+        if actual_data is None:
+            click.echo(f"    ❌ Could not read plan — aborting")
             return False
-        if not state_data:
-            click.echo(f"    ❌ Address '{resource.address}' not found in state")
+        if not actual_data:
+            click.echo(f"    ❌ Address '{resource.address}' not found in plan changes")
             return False
 
         if self.verbose:
-            click.echo(f"    State keys: {sorted(state_data.keys())}")
+            click.echo(f"    Actual (before) keys: {sorted(actual_data.keys())}")
 
         # 2. Filter to driftable attributes only
-        to_sync = {k: v for k, v in state_data.items() if k in DRIFTABLE_ATTRS}
+        to_sync = {k: v for k, v in actual_data.items() if k in DRIFTABLE_ATTRS}
         if self.verbose:
-            click.echo(f"    Driftable attributes from state: {sorted(to_sync.keys())}")
+            click.echo(f"    Driftable attributes to sync: {sorted(to_sync.keys())}")
 
         if not to_sync:
-            click.echo(f"    ℹ️  No driftable attributes in state for {resource.address}")
+            click.echo(f"    No driftable attributes found for {resource.address}")
             return False
 
         # 3. Compute which attributes actually differ from the config
         diffs = self._compute_diffs(file_path, resource, to_sync)
         if not diffs:
-            click.echo(f"    ✅ Config already matches state — no changes needed")
+            click.echo(f"    ✅ Config already matches live infrastructure — no changes needed")
             return False
 
         click.echo(f"    Attributes with drift: {sorted(diffs.keys())}")
@@ -156,55 +158,73 @@ class ConfigEditor:
         return self._apply_diffs_with_hcledit(file_path, resource, diffs)
 
     # ------------------------------------------------------------------
-    # State fetching
+    # Fetch actual infrastructure values via plan before-state
     # ------------------------------------------------------------------
 
-    def _get_resource_state(self, resource: ResourceChange) -> Optional[Dict[str, Any]]:
+    def _get_resource_actual_values(self, resource: ResourceChange) -> Optional[Dict[str, Any]]:
+        """
+        Run `tofu plan -out=<tmp>` then `tofu show -json <tmp>` to read
+        resource_changes[].change.before — the ACTUAL values in live
+        infrastructure, not just what is recorded in local state.
+        """
+        import tempfile
         original_cwd = Path.cwd()
+        plan_file = None
         os.chdir(self.project_path)
         try:
-            cmd = [self.tf_bin, "show", "-json"]
+            with tempfile.NamedTemporaryFile(suffix=".tfplan", delete=False) as tmp:
+                plan_file = tmp.name
+
+            plan_cmd = [self.tf_bin, "plan", "-out", plan_file, "-no-color"]
             if self.verbose:
-                click.echo(f"      Running: {' '.join(cmd)} (cwd={self.project_path})")
-
-            result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-
+                click.echo(f"      Running: {' '.join(plan_cmd)} (cwd={self.project_path})")
+            plan_result = subprocess.run(plan_cmd, capture_output=True, text=True, check=False)
             if self.verbose:
-                click.echo(f"      Exit code: {result.returncode}")
-            if result.stderr.strip():
-                click.echo(f"      stderr: {result.stderr.strip()}")
-
-            if result.returncode != 0:
-                click.echo(f"      ❌ `{self.tf_bin} show -json` failed (exit {result.returncode})")
+                click.echo(f"      plan exit code: {plan_result.returncode}")
+            if plan_result.returncode not in (0, 2):
+                click.echo(f"      ❌ plan failed (exit {plan_result.returncode})")
+                if plan_result.stderr.strip():
+                    click.echo(f"      stderr: {plan_result.stderr.strip()}")
                 return None
 
-            state_json = json.loads(result.stdout)
-            resources_in_state = (
-                state_json.get("values", {})
-                          .get("root_module", {})
-                          .get("resources", [])
-            )
+            show_cmd = [self.tf_bin, "show", "-json", plan_file]
+            if self.verbose:
+                click.echo(f"      Running: {' '.join(show_cmd)}")
+            show_result = subprocess.run(show_cmd, capture_output=True, text=True, check=False)
+            if show_result.returncode != 0:
+                click.echo(f"      ❌ show -json failed (exit {show_result.returncode})")
+                return None
+
+            plan_json = json.loads(show_result.stdout)
+            resource_changes = plan_json.get("resource_changes", [])
 
             if self.verbose:
-                addresses = [r.get("address") for r in resources_in_state]
-                click.echo(f"      Resources in state: {addresses}")
+                addresses = [rc.get("address") for rc in resource_changes]
+                click.echo(f"      Resource changes in plan: {addresses}")
 
-            for res in resources_in_state:
-                if res.get("address") == resource.address:
-                    return res.get("values", {})
+            for rc in resource_changes:
+                if rc.get("address") == resource.address:
+                    before = rc.get("change", {}).get("before") or {}
+                    if self.verbose:
+                        click.echo(f"      before keys: {sorted(before.keys())}")
+                    return before
 
-            return {}  # address not found (empty dict != None)
+            return {}  # not found in plan changes
 
         except Exception as e:
-            click.echo(f"      ❌ Exception reading state: {e}")
+            click.echo(f"      ❌ Exception reading plan: {e}")
             if self.verbose:
                 import traceback
                 traceback.print_exc()
             return None
         finally:
             os.chdir(original_cwd)
+            if plan_file:
+                try:
+                    Path(plan_file).unlink(missing_ok=True)
+                except Exception:
+                    pass
 
-    # ------------------------------------------------------------------
     # Diff computation — uses hcledit attribute get to read current values
     # ------------------------------------------------------------------
 
