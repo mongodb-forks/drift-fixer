@@ -87,7 +87,7 @@ resource "github_repository" "drift_test" {
   squash_merge_commit_message = "COMMIT_MESSAGES"
   squash_merge_commit_title   = "COMMIT_OR_PR_TITLE"
   topics                      = []
-  visibility                  = "private"
+  visibility                  = "public"
   web_commit_signoff_required = false
 }
 
