@@ -34,7 +34,7 @@ class ConfigEditor:
         """
         try:
             result = subprocess.run(
-                ['tfedit', '--version'],
+                ['tfedit', 'version'],
                 capture_output=True,
                 text=True,
                 check=False
