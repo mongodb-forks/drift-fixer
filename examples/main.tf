@@ -21,6 +21,42 @@ import {
   id = "drift-test"
 }
 
+import {
+  to = github_repository_ruleset.ruleset_15577636
+  id = "drift-test:15577636"
+}
+
+resource "github_repository_ruleset" "ruleset_15577636" {
+  enforcement = "disabled"
+  name        = "main"
+  repository  = "drift-test"
+  target      = "branch"
+  conditions {
+    ref_name {
+      exclude = []
+      include = ["~DEFAULT_BRANCH"]
+    }
+  }
+  rules {
+    creation                      = false
+    deletion                      = true
+    non_fast_forward              = true
+    required_linear_history       = false
+    required_signatures           = false
+    update                        = false
+    update_allows_fetch_and_merge = false
+    pull_request {
+      allowed_merge_methods             = ["merge", "squash", "rebase"]
+      dismiss_stale_reviews_on_push     = false
+      require_code_owner_review         = false
+      require_last_push_approval        = false
+      required_approving_review_count   = 1
+      required_review_thread_resolution = false
+    }
+  }
+}
+
+
 resource "github_repository" "drift_test" {
   allow_auto_merge            = false
   allow_forking               = true
@@ -32,7 +68,7 @@ resource "github_repository" "drift_test" {
   archived                    = false
   auto_init                   = false
   delete_branch_on_merge      = false
-  description                 = ""
+  description                 = "test2"
   etag                        = "W/\"7342f62a1deec60046e38a9ac6e82af3616833c0c30008091113806429970a75\""
   fork                        = "false"
   gitignore_template          = null
@@ -53,7 +89,5 @@ resource "github_repository" "drift_test" {
   topics                      = []
   visibility                  = "private"
   web_commit_signoff_required = false
-  has_downloads               = false
-  vulnerability_alerts        = null
 }
 
