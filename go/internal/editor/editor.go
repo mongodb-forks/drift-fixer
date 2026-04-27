@@ -11,6 +11,29 @@ import (
 	"github.com/zclconf/go-cty/cty"
 )
 
+// RemoveResource removes the `resource "rType" "rName" { ... }` block from
+// filePath and writes the result back. Returns true if the block was found
+// and removed.
+func RemoveResource(filePath, resourceType, resourceName string) (bool, error) {
+	src, err := os.ReadFile(filePath)
+	if err != nil {
+		return false, fmt.Errorf("read %s: %w", filePath, err)
+	}
+	f, diags := hclwrite.ParseConfig(src, filePath, hcl.InitialPos)
+	if diags.HasErrors() {
+		return false, fmt.Errorf("parse HCL %s: %s", filePath, diags.Error())
+	}
+	block := findResourceBlock(f.Body(), resourceType, resourceName)
+	if block == nil {
+		return false, nil
+	}
+	f.Body().RemoveBlock(block)
+	if err := os.WriteFile(filePath, f.Bytes(), 0644); err != nil {
+		return false, fmt.Errorf("write %s: %w", filePath, err)
+	}
+	return true, nil
+}
+
 // ApplyDrift reads filePath, applies the drifted attribute values for the
 // resource identified by (resourceType, resourceName), and writes it back.
 // Only attributes where before != after are passed in driftedAttrs.
@@ -60,36 +83,59 @@ func findResourceBlock(body *hclwrite.Body, rType, rName string) *hclwrite.Block
 func syncBody(body *hclwrite.Body, attrs map[string]interface{}, verbose bool, indent string) bool {
 	changed := false
 	for key, val := range attrs {
-		// Empty slice in plan JSON = zero-instance sub-block type. Never write
-		// these as attributes — they either don't belong in config at all, or
-		// belong as blocks (which toBlockData handles once non-empty).
-		if lst, ok := val.([]interface{}); ok && len(lst) == 0 {
-			continue
-		}
 		if val == nil {
 			continue
 		}
+		// Empty slice: could be "zero-instance block type" (infra deleted all
+		// instances) OR a scalar list attribute being set to empty.
+		// We disambiguate below: if existing config blocks of this type exist,
+		// remove them. Otherwise skip (it's just an unset scalar list).
+		if lst, ok := val.([]interface{}); ok && len(lst) == 0 {
+			existing := blocksOfType(body, key)
+			if len(existing) > 0 {
+				for _, b := range existing {
+					body.RemoveBlock(b)
+					if verbose {
+						fmt.Printf("%s[block] removed %s (empty in infra)\n", indent, key)
+					}
+					changed = true
+				}
+			}
+			// If no existing blocks, nothing to do — skip writing `= []`
+			continue
+		}
 		if isBlockValue(val) {
-			// Nested block — may appear multiple times (e.g. bypass_actors, required_check).
-			// Collect all the map instances from the plan value.
+			// Nested block — may appear multiple times (e.g. bypass_actors).
 			items := toBlockItems(val)
 			if len(items) == 0 {
 				continue
 			}
-			// Get all existing blocks of this type in the file body.
 			existing := blocksOfType(body, key)
-			for i, blockData := range items {
-				var target *hclwrite.Block
-				if i < len(existing) {
-					target = existing[i]
-				} else {
-					target = body.AppendNewBlock(key, nil)
-				}
-				if syncBody(target.Body(), blockData, verbose, indent+"  ") {
-					if verbose {
-						fmt.Printf("%s[block] synced %s[%d]\n", indent, key, i)
+			if len(existing) == 0 {
+				// Block type entirely absent from config: add all instances from plan.
+				for i, blockData := range items {
+					target := body.AppendNewBlock(key, nil)
+					if syncBody(target.Body(), blockData, verbose, indent+"  ") {
+						if verbose {
+							fmt.Printf("%s[block] added %s[%d]\n", indent, key, i)
+						}
+						changed = true
 					}
-					changed = true
+				}
+			} else {
+				// Block type already present: only update existing instances.
+				// Do NOT add new ones — the user controls how many blocks exist
+				// (e.g. they may have intentionally removed one to delete it from infra).
+				for i, target := range existing {
+					if i >= len(items) {
+						break
+					}
+					if syncBody(target.Body(), items[i], verbose, indent+"  ") {
+						if verbose {
+							fmt.Printf("%s[block] synced %s[%d]\n", indent, key, i)
+						}
+						changed = true
+					}
 				}
 			}
 		} else {
@@ -165,6 +211,11 @@ func toCty(v interface{}) (cty.Value, error) {
 	case bool:
 		return cty.BoolVal(val), nil
 	case float64:
+		// JSON numbers are always float64. If the value is a whole number,
+		// use NumberIntVal to avoid scientific notation (e.g. 1.236702e+06).
+		if val == float64(int64(val)) {
+			return cty.NumberIntVal(int64(val)), nil
+		}
 		return cty.NumberVal(new(big.Float).SetFloat64(val)), nil
 	case string:
 		return cty.StringVal(val), nil

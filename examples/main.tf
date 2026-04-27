@@ -64,7 +64,7 @@ resource "github_repository_ruleset" "ruleset_15577636" {
   }
   bypass_actors {
     actor_type  = "Integration"
-    bypass_mode = "exempt"
+    bypass_mode = "always"
     actor_id    = 946600
   }
   bypass_actors {

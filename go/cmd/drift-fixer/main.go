@@ -68,13 +68,30 @@ func main() {
 		relPath := relOrAbs(filePath, projectDir)
 		for _, addr := range addrs {
 			d := driftByAddr[addr]
+			if *dryRun {
+				if d.Delete {
+					fmt.Printf("  [DRY RUN] would remove %s from %s\n", addr, relPath)
+				} else {
+					fmt.Printf("  [DRY RUN] would update %s in %s\n", addr, relPath)
+				}
+				continue
+			}
+			if d.Delete {
+				fmt.Printf("\n  Removing %s from %s (deleted from infra)...\n", addr, relPath)
+				removed, err := editor.RemoveResource(filePath, d.ResourceType, d.ResourceName)
+				if err != nil {
+					fmt.Printf("  ❌ %s: %v\n", addr, err)
+					allFixed = false
+				} else if removed {
+					fmt.Printf("  ✅ Removed %s from %s\n", addr, relPath)
+				} else {
+					fmt.Printf("  ⚠️  %s not found in %s\n", addr, relPath)
+				}
+				continue
+			}
 			if *verbose {
 				fmt.Printf("\n  Syncing %s in %s\n", addr, relPath)
 				fmt.Printf("  Drifted attrs: %s\n", keys(d.DriftedAttrs))
-			}
-			if *dryRun {
-				fmt.Printf("  [DRY RUN] would update %s in %s\n", addr, relPath)
-				continue
 			}
 			changed, err := editor.ApplyDrift(filePath, d.ResourceType, d.ResourceName, d.DriftedAttrs, *verbose)
 			if err != nil {

@@ -13,6 +13,9 @@ type ResourceDrift struct {
 	Address      string
 	ResourceType string
 	ResourceName string
+	// Delete is true when the resource exists in config but has been deleted
+	// from the real infrastructure (plan action = "delete").
+	Delete bool
 	// DriftedAttrs maps attribute name → live (before) value for attrs where
 	// before != after. Only leaf attributes that are not sensitive are included.
 	// Block-type values (map / []interface{}) are included as-is for the editor.
@@ -72,12 +75,27 @@ func Run(projectDir, tfBin string, verbose bool) ([]ResourceDrift, error) {
 		if ch.Before == nil {
 			continue
 		}
-		// Only process updates / replaces (not creates / deletes)
-		isUpdate := false
+		// Determine the action type
+		isUpdate, isDelete := false, false
 		for _, a := range ch.Actions {
-			if a == "update" || a == "replace" {
+			switch a {
+			case "update", "replace":
 				isUpdate = true
+			case "delete":
+				isDelete = true
 			}
+		}
+
+		if isDelete && !isUpdate {
+			// Resource was deleted from infra — record it so the editor can
+			// remove the block from config.
+			drifts = append(drifts, ResourceDrift{
+				Address:      rc.Address,
+				ResourceType: rc.Type,
+				ResourceName: rc.Name,
+				Delete:       true,
+			})
+			continue
 		}
 		if !isUpdate {
 			continue
