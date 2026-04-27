@@ -35,9 +35,9 @@ resource "github_repository_ruleset" "ruleset_15577636" {
     ref_name {
       exclude = []
       include = [
-        "~DEFAULT_BRANCH",
-        "refs/heads/releases/**/*",
-        "refs/heads/meep",
+        "~DEFAULT_BRANCH", # test comment
+        "refs/heads/releases/**/*", # test comment 2
+        "refs/heads/meep", # test comment 3
       ]
     }
   }
