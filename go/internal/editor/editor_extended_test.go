@@ -173,7 +173,7 @@ resource "github_repository" "repo" {
 	// nil value should be silently ignored; only description should change.
 	out := applyDriftToString(t, input, "github_repository", "repo",
 		map[string]interface{}{
-			"description": "new",
+			"description":  "new",
 			"homepage_url": nil,
 		})
 	assertContains(t, out, `description = "new"`)
@@ -274,7 +274,7 @@ resource "github_repository" "repo_b" {
 	out := applyDriftToString(t, input, "github_repository", "repo_a",
 		map[string]interface{}{"description": "a-updated"})
 	assertContains(t, out, `"a-updated"`)
-	assertContains(t, out, `"b"`) // repo_b unchanged
+	assertContains(t, out, `"b"`)    // repo_b unchanged
 	assertNotContains(t, out, `"a"`) // original gone
 }
 
