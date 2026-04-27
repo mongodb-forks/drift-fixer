@@ -34,7 +34,11 @@ resource "github_repository_ruleset" "ruleset_15577636" {
   conditions {
     ref_name {
       exclude = []
-      include = ["~DEFAULT_BRANCH"]
+      include = [
+        "~DEFAULT_BRANCH",
+        "refs/heads/releases/**/*",
+        "refs/heads/meep",
+      ]
     }
   }
   rules {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"strings"
 
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/hclsyntax"
@@ -174,11 +175,71 @@ func blocksOfType(body *hclwrite.Body, blockType string) []*hclwrite.Block {
 	return out
 }
 
+// extractItemComments parses the existing list attribute on body (if any) and
+// returns a map from rendered-value-string → comment tokens that appear before
+// that item. Keying by value content means comments survive list reordering and
+// insertions. Only // and # single-line comments are captured.
+func extractItemComments(body *hclwrite.Body, key string) map[string]hclwrite.Tokens {
+	attr := body.GetAttribute(key)
+	if attr == nil {
+		return nil
+	}
+	exprToks := attr.Expr().BuildTokens(nil)
+	result := make(map[string]hclwrite.Tokens)
+	inList := false
+	betweenItems := false // true after [ or , until we hit the next value
+	var pendingComments hclwrite.Tokens
+	var valueBuf []byte
+	for _, t := range exprToks {
+		switch t.Type {
+		case hclsyntax.TokenOBrack:
+			inList = true
+			betweenItems = true
+		case hclsyntax.TokenCBrack:
+			// end of list — flush last item
+			if len(valueBuf) > 0 && len(pendingComments) > 0 {
+				result[strings.TrimSpace(string(valueBuf))] = pendingComments
+			}
+			inList = false
+		case hclsyntax.TokenComment:
+			if inList && betweenItems {
+				pendingComments = append(pendingComments, t)
+			}
+		case hclsyntax.TokenComma:
+			if inList {
+				// flush the item we just finished
+				if len(valueBuf) > 0 && len(pendingComments) > 0 {
+					result[strings.TrimSpace(string(valueBuf))] = pendingComments
+				}
+				pendingComments = nil
+				valueBuf = nil
+				betweenItems = true
+			}
+		case hclsyntax.TokenNewline:
+			// skip
+		default:
+			if inList {
+				if betweenItems {
+					// first non-trivial token of the new value
+					betweenItems = false
+				}
+				valueBuf = append(valueBuf, t.Bytes...)
+			}
+		}
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
 // setAttributeVal sets a scalar attribute on body. Lists with more than one
 // item are formatted one-item-per-line; everything else uses SetAttributeValue.
+// Comments present in the existing attribute are preserved by value content.
 func setAttributeVal(body *hclwrite.Body, key string, val interface{}) error {
 	if lst, ok := val.([]interface{}); ok && len(lst) > 1 {
-		toks, err := multilineListTokens(lst)
+		comments := extractItemComments(body, key)
+		toks, err := multilineListTokens(lst, comments)
 		if err == nil {
 			body.SetAttributeRaw(key, toks)
 			return nil
@@ -200,7 +261,9 @@ func setAttributeVal(body *hclwrite.Body, key string, val interface{}) error {
 //	  42,
 //	  true,
 //	]
-func multilineListTokens(items []interface{}) (hclwrite.Tokens, error) {
+//
+// comments maps rendered-value-string → comment tokens to inject before that item.
+func multilineListTokens(items []interface{}, comments map[string]hclwrite.Tokens) (hclwrite.Tokens, error) {
 	tok := func(t hclsyntax.TokenType, b string) *hclwrite.Token {
 		return &hclwrite.Token{Type: t, Bytes: []byte(b)}
 	}
@@ -213,7 +276,18 @@ func multilineListTokens(items []interface{}) (hclwrite.Tokens, error) {
 		if err != nil {
 			return nil, err
 		}
-		toks = append(toks, hclwrite.TokensForValue(ctyVal)...)
+		valToks := hclwrite.TokensForValue(ctyVal)
+		// Build the lookup key the same way extractItemComments does: join the
+		// rendered bytes of the value tokens and trim surrounding whitespace.
+		var keyBuf []byte
+		for _, vt := range valToks {
+			keyBuf = append(keyBuf, vt.Bytes...)
+		}
+		valKey := strings.TrimSpace(string(keyBuf))
+		if cs, ok := comments[valKey]; ok {
+			toks = append(toks, cs...)
+		}
+		toks = append(toks, valToks...)
 		toks = append(toks,
 			tok(hclsyntax.TokenComma, ","),
 			tok(hclsyntax.TokenNewline, "\n"),

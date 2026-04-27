@@ -413,3 +413,36 @@ resource "example_resource" "r" {
 		t.Errorf("expected multi-line int list, got:\n%s", out)
 	}
 }
+
+func TestCommentsPreservedInList(t *testing.T) {
+	// Comments between list items must survive a drift sync, including when
+	// the list is reordered or a new item is inserted before a commented item.
+	input := `
+resource "example_resource" "r" {
+  include = [
+    # default branch
+    "~DEFAULT_BRANCH",
+    # release branches
+    "refs/heads/releases/**/*",
+  ]
+}
+`
+	// Drift inserts a new item at the front and reorders; comments must follow
+	// their original values, not their original positions.
+	out := applyDriftToString(t, input, "example_resource", "r",
+		map[string]interface{}{
+			"include": []interface{}{"refs/heads/main", "~DEFAULT_BRANCH", "refs/heads/releases/**/*"},
+		})
+
+	assertContains(t, out, `"refs/heads/main"`)
+	// Comment for ~DEFAULT_BRANCH should still immediately precede it
+	assertContains(t, out, "# default branch")
+	assertContains(t, out, "# release branches")
+
+	// Verify ordering: "# default branch" comes after "refs/heads/main"
+	mainIdx := strings.Index(out, `"refs/heads/main"`)
+	defaultCommentIdx := strings.Index(out, "# default branch")
+	if defaultCommentIdx < mainIdx {
+		t.Errorf("expected '# default branch' to appear after 'refs/heads/main', got:\n%s", out)
+	}
+}
