@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/hashicorp/hcl/v2"
+	"github.com/hashicorp/hcl/v2/hclsyntax"
 	"github.com/hashicorp/hcl/v2/hclwrite"
 	"github.com/zclconf/go-cty/cty"
 )
@@ -147,16 +148,12 @@ func syncBody(body *hclwrite.Body, attrs map[string]interface{}, verbose bool, i
 				// (they removed some from config to delete them). Leave as-is.
 			}
 		} else {
-			// Scalar attribute — convert to cty and set
-			ctyVal, err := toCty(val)
-			if err != nil {
+			// Scalar attribute — set using raw tokens so string lists get
+			// one-item-per-line formatting instead of a single long line.
+			if err := setAttributeVal(body, key, val); err != nil {
 				fmt.Printf("%s[warn] skip %s: %v\n", indent, key, err)
 				continue
 			}
-			// Check if already equal to avoid unnecessary rewrites
-			existing := body.GetAttribute(key)
-			_ = existing
-			body.SetAttributeValue(key, ctyVal)
 			if verbose {
 				fmt.Printf("%s[attr] set %s = %v\n", indent, key, val)
 			}
@@ -175,6 +172,60 @@ func blocksOfType(body *hclwrite.Body, blockType string) []*hclwrite.Block {
 		}
 	}
 	return out
+}
+
+// setAttributeVal sets a scalar attribute on body. String lists with more than
+// one item are formatted one-item-per-line; everything else uses SetAttributeValue.
+func setAttributeVal(body *hclwrite.Body, key string, val interface{}) error {
+	if lst, ok := val.([]interface{}); ok && len(lst) > 1 {
+		// Check it's a string list (the only kind we multi-line format)
+		strs := make([]string, 0, len(lst))
+		for _, item := range lst {
+			s, ok := item.(string)
+			if !ok {
+				// Mixed/non-string list — fall through to SetAttributeValue
+				goto fallback
+			}
+			strs = append(strs, s)
+		}
+		body.SetAttributeRaw(key, multilineStringListTokens(strs))
+		return nil
+	}
+fallback:
+	ctyVal, err := toCty(val)
+	if err != nil {
+		return err
+	}
+	body.SetAttributeValue(key, ctyVal)
+	return nil
+}
+
+// multilineStringListTokens builds the hclwrite token sequence for:
+//
+//	= [
+//	  "a",
+//	  "b",
+//	]
+func multilineStringListTokens(items []string) hclwrite.Tokens {
+	tok := func(t hclsyntax.TokenType, b string) *hclwrite.Token {
+		return &hclwrite.Token{Type: t, Bytes: []byte(b)}
+	}
+	toks := hclwrite.Tokens{
+		tok(hclsyntax.TokenOBrack, "["),
+		tok(hclsyntax.TokenNewline, "\n"),
+	}
+	for _, s := range items {
+		toks = append(toks,
+			tok(hclsyntax.TokenIdent, "  "),
+			tok(hclsyntax.TokenQuotedLit, `"`+s+`"`),
+			tok(hclsyntax.TokenComma, ","),
+			tok(hclsyntax.TokenNewline, "\n"),
+		)
+	}
+	toks = append(toks,
+		tok(hclsyntax.TokenCBrack, "]"),
+	)
+	return toks
 }
 
 // toBlockItems returns all map instances from a block value (map or list-of-maps).

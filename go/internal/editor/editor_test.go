@@ -337,3 +337,59 @@ resource "github_repository" "repo" {
 		t.Error("expected removed=false for nonexistent resource")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Multi-line list formatting tests
+// ---------------------------------------------------------------------------
+
+func TestMultilineStringListFormatting(t *testing.T) {
+	// A string list with >1 items should be written one-item-per-line.
+	input := `
+resource "github_repository_ruleset" "rs" {
+  rules {
+    pull_request {
+      allowed_merge_methods = ["merge"]
+    }
+  }
+}
+`
+	out := applyDriftToString(t, input, "github_repository_ruleset", "rs",
+		map[string]interface{}{
+			"rules": map[string]interface{}{
+				"pull_request": map[string]interface{}{
+					"allowed_merge_methods": []interface{}{"merge", "squash", "rebase"},
+				},
+			},
+		})
+
+	assertContains(t, out, "\"merge\",")
+	assertContains(t, out, "\"squash\",")
+	assertContains(t, out, "\"rebase\",")
+	// Each item should be on its own line
+	if strings.Count(out, "\n") < strings.Count(input, "\n")+2 {
+		t.Errorf("expected multi-line list, got:\n%s", out)
+	}
+}
+
+func TestSingleItemListStaysOnOneLine(t *testing.T) {
+	// A single-item list should stay on one line (not multi-line).
+	input := `
+resource "github_repository_ruleset" "rs" {
+  rules {
+    pull_request {
+      allowed_merge_methods = ["merge", "squash"]
+    }
+  }
+}
+`
+	out := applyDriftToString(t, input, "github_repository_ruleset", "rs",
+		map[string]interface{}{
+			"rules": map[string]interface{}{
+				"pull_request": map[string]interface{}{
+					"allowed_merge_methods": []interface{}{"merge"},
+				},
+			},
+		})
+
+	assertContains(t, out, `"merge"`)
+}
