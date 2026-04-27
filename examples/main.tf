@@ -53,6 +53,14 @@ resource "github_repository_ruleset" "ruleset_15577636" {
       required_approving_review_count   = 1
       required_review_thread_resolution = false
     }
+    required_status_checks {
+      do_not_enforce_on_create = false
+      required_check {
+        context        = "test_check"
+        integration_id = 0
+      }
+      strict_required_status_checks_policy = false
+    }
   }
 }
 
