@@ -35,8 +35,11 @@ resource "github_repository_ruleset" "ruleset_15577636" {
     ref_name {
       exclude = []
       include = [
+        #test
         "~DEFAULT_BRANCH", # test comment
+        #pee pee
         "refs/heads/releases/**/*", # test comment 2
+        //poo poo
         "refs/heads/meep", # test comment 3
       ]
     }
