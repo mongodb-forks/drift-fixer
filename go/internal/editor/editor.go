@@ -29,7 +29,7 @@ func RemoveResource(filePath, resourceType, resourceName string) (bool, error) {
 		return false, nil
 	}
 	f.Body().RemoveBlock(block)
-	if err := os.WriteFile(filePath, f.Bytes(), 0644); err != nil {
+	if err := os.WriteFile(filePath, hclwrite.Format(f.Bytes()), 0644); err != nil {
 		return false, fmt.Errorf("write %s: %w", filePath, err)
 	}
 	return true, nil
@@ -60,7 +60,7 @@ func ApplyDrift(filePath, resourceType, resourceName string, driftedAttrs map[st
 		return false, nil
 	}
 
-	if err := os.WriteFile(filePath, f.Bytes(), 0644); err != nil {
+	if err := os.WriteFile(filePath, hclwrite.Format(f.Bytes()), 0644); err != nil {
 		return false, fmt.Errorf("write %s: %w", filePath, err)
 	}
 	return true, nil
@@ -213,7 +213,6 @@ func multilineListTokens(items []interface{}) (hclwrite.Tokens, error) {
 		if err != nil {
 			return nil, err
 		}
-		toks = append(toks, tok(hclsyntax.TokenIdent, "  "))
 		toks = append(toks, hclwrite.TokensForValue(ctyVal)...)
 		toks = append(toks,
 			tok(hclsyntax.TokenComma, ","),
