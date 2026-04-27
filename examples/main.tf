@@ -62,6 +62,16 @@ resource "github_repository_ruleset" "ruleset_15577636" {
       strict_required_status_checks_policy = false
     }
   }
+  bypass_actors {
+    actor_type  = "Integration"
+    bypass_mode = "exempt"
+    actor_id    = 946600
+  }
+  bypass_actors {
+    actor_id    = 1236702
+    actor_type  = "Integration"
+    bypass_mode = "always"
+  }
 }
 
 
