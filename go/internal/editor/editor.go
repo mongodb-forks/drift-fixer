@@ -123,20 +123,28 @@ func syncBody(body *hclwrite.Body, attrs map[string]interface{}, verbose bool, i
 					}
 				}
 			} else {
-				// Block type already present: only update existing instances.
-				// Do NOT add new ones — the user controls how many blocks exist
-				// (e.g. they may have intentionally removed one to delete it from infra).
-				for i, target := range existing {
-					if i >= len(items) {
-						break
-					}
-					if syncBody(target.Body(), items[i], verbose, indent+"  ") {
+				// Block type already present. Sync by index up to min(existing, plan).
+				for i := 0; i < len(existing) && i < len(items); i++ {
+					if syncBody(existing[i].Body(), items[i], verbose, indent+"  ") {
 						if verbose {
 							fmt.Printf("%s[block] synced %s[%d]\n", indent, key, i)
 						}
 						changed = true
 					}
 				}
+				if len(existing) > len(items) {
+					// Config has more instances than infra — remove the excess.
+					// This happens when a block was deleted from infra.
+					for _, b := range existing[len(items):] {
+						body.RemoveBlock(b)
+						if verbose {
+							fmt.Printf("%s[block] removed excess %s (infra has fewer)\n", indent, key)
+						}
+						changed = true
+					}
+				}
+				// If existing < items: user intentionally has fewer blocks than infra
+				// (they removed some from config to delete them). Leave as-is.
 			}
 		} else {
 			// Scalar attribute — convert to cty and set
