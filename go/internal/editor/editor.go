@@ -70,18 +70,27 @@ func syncBody(body *hclwrite.Body, attrs map[string]interface{}, verbose bool, i
 			continue
 		}
 		if isBlockValue(val) {
-			// Nested block (map or list-of-maps). Find or create the block, recurse.
-			blockData := toBlockData(val)
-			if blockData == nil {
-				// Empty list-of-maps = zero-instance sub-block type, nothing to write.
+			// Nested block — may appear multiple times (e.g. bypass_actors, required_check).
+			// Collect all the map instances from the plan value.
+			items := toBlockItems(val)
+			if len(items) == 0 {
 				continue
 			}
-			nested := findOrCreateBlock(body, key)
-			if syncBody(nested.Body(), blockData, verbose, indent+"  ") {
-				if verbose {
-					fmt.Printf("%s[block] synced %s\n", indent, key)
+			// Get all existing blocks of this type in the file body.
+			existing := blocksOfType(body, key)
+			for i, blockData := range items {
+				var target *hclwrite.Block
+				if i < len(existing) {
+					target = existing[i]
+				} else {
+					target = body.AppendNewBlock(key, nil)
 				}
-				changed = true
+				if syncBody(target.Body(), blockData, verbose, indent+"  ") {
+					if verbose {
+						fmt.Printf("%s[block] synced %s[%d]\n", indent, key, i)
+					}
+					changed = true
+				}
 			}
 		} else {
 			// Scalar attribute — convert to cty and set
@@ -103,14 +112,32 @@ func syncBody(body *hclwrite.Body, attrs map[string]interface{}, verbose bool, i
 	return changed
 }
 
-// findOrCreateBlock returns the first block of the given type, creating it if absent.
-func findOrCreateBlock(body *hclwrite.Body, blockType string) *hclwrite.Block {
+// blocksOfType returns all blocks of the given type from body, in order.
+func blocksOfType(body *hclwrite.Body, blockType string) []*hclwrite.Block {
+	var out []*hclwrite.Block
 	for _, b := range body.Blocks() {
 		if b.Type() == blockType {
-			return b
+			out = append(out, b)
 		}
 	}
-	return body.AppendNewBlock(blockType, nil)
+	return out
+}
+
+// toBlockItems returns all map instances from a block value (map or list-of-maps).
+func toBlockItems(v interface{}) []map[string]interface{} {
+	switch val := v.(type) {
+	case map[string]interface{}:
+		return []map[string]interface{}{val}
+	case []interface{}:
+		var out []map[string]interface{}
+		for _, item := range val {
+			if m, ok := item.(map[string]interface{}); ok {
+				out = append(out, m)
+			}
+		}
+		return out
+	}
+	return nil
 }
 
 // isBlockValue returns true if the JSON value represents an HCL block
@@ -127,22 +154,6 @@ func isBlockValue(v interface{}) bool {
 		}
 	}
 	return false
-}
-
-// toBlockData returns the map to use for a block value.
-// For a list-of-maps, returns the first map (most providers allow one instance).
-func toBlockData(v interface{}) map[string]interface{} {
-	switch val := v.(type) {
-	case map[string]interface{}:
-		return val
-	case []interface{}:
-		for _, item := range val {
-			if m, ok := item.(map[string]interface{}); ok {
-				return m
-			}
-		}
-	}
-	return nil
 }
 
 // toCty converts a JSON-unmarshalled value to a cty.Value suitable for hclwrite.
