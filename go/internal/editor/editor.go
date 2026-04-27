@@ -175,53 +175,90 @@ func blocksOfType(body *hclwrite.Body, blockType string) []*hclwrite.Block {
 	return out
 }
 
+// itemComment holds any comments associated with a single list item.
+type itemComment struct {
+	before hclwrite.Tokens // comment line(s) on their own line(s) preceding the value
+	inline *hclwrite.Token // trailing comment on the same line as the value (may be nil)
+}
+
 // extractItemComments parses the existing list attribute on body (if any) and
-// returns a map from rendered-value-string → comment tokens that appear before
-// that item. Keying by value content means comments survive list reordering and
-// insertions. Only // and # single-line comments are captured.
-func extractItemComments(body *hclwrite.Body, key string) map[string]hclwrite.Tokens {
+// returns a map from rendered-value-string → itemComment.
+// Keying by value content means comments survive list reordering and insertions.
+//
+// Token ordering in hclwrite: value, comma, [inline-comment], newline, [before-comments…], next-value
+// So "inline" is detected by a comment arriving after the comma before any newline.
+func extractItemComments(body *hclwrite.Body, key string) map[string]itemComment {
 	attr := body.GetAttribute(key)
 	if attr == nil {
 		return nil
 	}
 	exprToks := attr.Expr().BuildTokens(nil)
-	result := make(map[string]hclwrite.Tokens)
+	result := make(map[string]itemComment)
 	inList := false
-	betweenItems := false // true after [ or , until we hit the next value
-	var pendingComments hclwrite.Tokens
+	betweenItems := false // after newline-following-comma, until next value
+	justComma := false    // after comma, before any newline
+	var beforeComments hclwrite.Tokens
 	var valueBuf []byte
+	var prevKey string // key of the item whose comma we just passed
 	for _, t := range exprToks {
 		switch t.Type {
 		case hclsyntax.TokenOBrack:
 			inList = true
 			betweenItems = true
 		case hclsyntax.TokenCBrack:
-			// end of list — flush last item
-			if len(valueBuf) > 0 && len(pendingComments) > 0 {
-				result[strings.TrimSpace(string(valueBuf))] = pendingComments
+			// flush last item (no comma follows it)
+			if len(valueBuf) > 0 && len(beforeComments) > 0 {
+				k := strings.TrimSpace(string(valueBuf))
+				c := result[k]
+				c.before = beforeComments
+				result[k] = c
 			}
 			inList = false
 		case hclsyntax.TokenComment:
-			if inList && betweenItems {
-				pendingComments = append(pendingComments, t)
+			if !inList {
+				break
+			}
+			if justComma {
+				// Inline: comment is on the same line as the comma.
+				// The comment token includes its trailing \n, so treat it as the
+				// line ending — transition to betweenItems so any further comments
+				// are treated as before-comments for the next value.
+				c := result[prevKey]
+				c.inline = t
+				result[prevKey] = c
+				justComma = false
+				betweenItems = true
+			} else if betweenItems {
+				// Preceding-line: comment on its own line before the next value
+				beforeComments = append(beforeComments, t)
 			}
 		case hclsyntax.TokenComma:
 			if inList {
-				// flush the item we just finished
-				if len(valueBuf) > 0 && len(pendingComments) > 0 {
-					result[strings.TrimSpace(string(valueBuf))] = pendingComments
+				// Commit the current item's before-comments; inline arrives next.
+				if len(valueBuf) > 0 {
+					k := strings.TrimSpace(string(valueBuf))
+					if len(beforeComments) > 0 {
+						c := result[k]
+						c.before = beforeComments
+						result[k] = c
+					}
+					prevKey = k
 				}
-				pendingComments = nil
+				beforeComments = nil
 				valueBuf = nil
-				betweenItems = true
+				justComma = true
+				betweenItems = false
 			}
 		case hclsyntax.TokenNewline:
-			// skip
+			if inList && justComma {
+				justComma = false
+				betweenItems = true
+			}
 		default:
 			if inList {
-				if betweenItems {
-					// first non-trivial token of the new value
+				if betweenItems || justComma {
 					betweenItems = false
+					justComma = false
 				}
 				valueBuf = append(valueBuf, t.Bytes...)
 			}
@@ -257,13 +294,13 @@ func setAttributeVal(body *hclwrite.Body, key string, val interface{}) error {
 // multilineListTokens builds tokens for a multi-line list of any scalar type:
 //
 //	= [
-//	  "a",
+//	  # before comment
+//	  "a",  # inline comment
 //	  42,
-//	  true,
 //	]
 //
-// comments maps rendered-value-string → comment tokens to inject before that item.
-func multilineListTokens(items []interface{}, comments map[string]hclwrite.Tokens) (hclwrite.Tokens, error) {
+// comments maps rendered-value-string → itemComment (before lines + inline).
+func multilineListTokens(items []interface{}, comments map[string]itemComment) (hclwrite.Tokens, error) {
 	tok := func(t hclsyntax.TokenType, b string) *hclwrite.Token {
 		return &hclwrite.Token{Type: t, Bytes: []byte(b)}
 	}
@@ -277,21 +314,24 @@ func multilineListTokens(items []interface{}, comments map[string]hclwrite.Token
 			return nil, err
 		}
 		valToks := hclwrite.TokensForValue(ctyVal)
-		// Build the lookup key the same way extractItemComments does: join the
-		// rendered bytes of the value tokens and trim surrounding whitespace.
 		var keyBuf []byte
 		for _, vt := range valToks {
 			keyBuf = append(keyBuf, vt.Bytes...)
 		}
 		valKey := strings.TrimSpace(string(keyBuf))
-		if cs, ok := comments[valKey]; ok {
-			toks = append(toks, cs...)
-		}
+		c := comments[valKey]
+		// Emit any preceding-line comments.
+		toks = append(toks, c.before...)
+		// Emit the value itself.
 		toks = append(toks, valToks...)
-		toks = append(toks,
-			tok(hclsyntax.TokenComma, ","),
-			tok(hclsyntax.TokenNewline, "\n"),
-		)
+		// Emit comma; if there's an inline comment it carries its own trailing
+		// newline in its bytes, so skip our explicit newline in that case.
+		toks = append(toks, tok(hclsyntax.TokenComma, ","))
+		if c.inline != nil {
+			toks = append(toks, c.inline)
+		} else {
+			toks = append(toks, tok(hclsyntax.TokenNewline, "\n"))
+		}
 	}
 	toks = append(toks, tok(hclsyntax.TokenCBrack, "]"))
 	return toks, nil

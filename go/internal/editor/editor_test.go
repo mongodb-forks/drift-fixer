@@ -415,34 +415,51 @@ resource "example_resource" "r" {
 }
 
 func TestCommentsPreservedInList(t *testing.T) {
-	// Comments between list items must survive a drift sync, including when
-	// the list is reordered or a new item is inserted before a commented item.
+	// Both preceding-line and inline comments must survive a drift sync,
+	// including the tricky case where an inline comment is immediately followed
+	// by a preceding-line comment for the next item.
 	input := `
 resource "example_resource" "r" {
   include = [
-    # default branch
-    "~DEFAULT_BRANCH",
-    # release branches
-    "refs/heads/releases/**/*",
+    # before A
+    "A", # inline A
+    # before B
+    "B", # inline B
+    "C",
   ]
 }
 `
-	// Drift inserts a new item at the front and reorders; comments must follow
-	// their original values, not their original positions.
+	// Drift adds a new item "D"; all existing comments must be preserved.
 	out := applyDriftToString(t, input, "example_resource", "r",
 		map[string]interface{}{
-			"include": []interface{}{"refs/heads/main", "~DEFAULT_BRANCH", "refs/heads/releases/**/*"},
+			"include": []interface{}{"A", "B", "C", "D"},
 		})
 
-	assertContains(t, out, `"refs/heads/main"`)
-	// Comment for ~DEFAULT_BRANCH should still immediately precede it
-	assertContains(t, out, "# default branch")
-	assertContains(t, out, "# release branches")
+	assertContains(t, out, "# before A")
+	assertContains(t, out, "# inline A")
+	assertContains(t, out, "# before B")
+	assertContains(t, out, "# inline B")
+	assertContains(t, out, `"D"`)
 
-	// Verify ordering: "# default branch" comes after "refs/heads/main"
-	mainIdx := strings.Index(out, `"refs/heads/main"`)
-	defaultCommentIdx := strings.Index(out, "# default branch")
-	if defaultCommentIdx < mainIdx {
-		t.Errorf("expected '# default branch' to appear after 'refs/heads/main', got:\n%s", out)
+	// Inline comment must be on the same line as its value.
+	for _, tc := range []struct{ val, comment string }{
+		{`"A"`, "# inline A"},
+		{`"B"`, "# inline B"},
+	} {
+		for _, line := range strings.Split(out, "\n") {
+			if strings.Contains(line, tc.val) {
+				if !strings.Contains(line, tc.comment) {
+					t.Errorf("expected %q on same line as %q, got: %q", tc.comment, tc.val, line)
+				}
+				break
+			}
+		}
+	}
+
+	// before-comment for B must appear after the line containing A.
+	aIdx := strings.Index(out, `"A"`)
+	beforeBIdx := strings.Index(out, "# before B")
+	if beforeBIdx < aIdx {
+		t.Errorf("expected '# before B' after line with A, got:\n%s", out)
 	}
 }
