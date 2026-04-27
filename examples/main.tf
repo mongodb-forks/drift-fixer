@@ -37,10 +37,9 @@ resource "github_repository_ruleset" "ruleset_15577636" {
       include = [
         #test
         "~DEFAULT_BRANCH", # test comment
-        #pee pee
-        "refs/heads/releases/**/*", # test comment 2
         //poo poo
         "refs/heads/meep", # test comment 3
+        "refs/heads/will the comments stay?",
       ]
     }
   }

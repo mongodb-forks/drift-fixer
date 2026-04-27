@@ -16,7 +16,7 @@ func applyDriftToString(t *testing.T, inputHCL string, rType, rName string, drif
 	if err := os.WriteFile(path, []byte(inputHCL), 0644); err != nil {
 		t.Fatalf("write temp file: %v", err)
 	}
-	_, err := ApplyDrift(path, rType, rName, drifted, false)
+	_, err := ApplyDrift(path, rType, rName, drifted, false, nil)
 	if err != nil {
 		t.Fatalf("ApplyDrift: %v", err)
 	}
@@ -411,6 +411,73 @@ resource "example_resource" "r" {
 	assertContains(t, out, "8080,")
 	if strings.Count(out, "\n") < strings.Count(input, "\n")+2 {
 		t.Errorf("expected multi-line int list, got:\n%s", out)
+	}
+}
+
+func TestCommentHook(t *testing.T) {
+	// Hook should add inline comments to new/updated scalar attrs and list items.
+	input := `
+resource "example_resource" "r" {
+  name = "old"
+  tags = ["a"]
+}
+`
+	hook := func(rType, rName, path, value string) string {
+		if rType != "example_resource" || rName != "r" {
+			return ""
+		}
+		switch value {
+		case `"new"`: // scalar attr — value arrives rendered (quoted)
+			return "updated name"
+		case `"a"`, `"b"`: // list items — values arrive rendered (quoted)
+			return value + " tag"
+		}
+		return ""
+	}
+
+	dir := t.TempDir()
+	fpath := filepath.Join(dir, "main.tf")
+	if err := os.WriteFile(fpath, []byte(input), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_, err := ApplyDrift(fpath, "example_resource", "r", map[string]interface{}{
+		"name": "new",
+		"tags": []interface{}{"a", "b"},
+	}, false, hook)
+	if err != nil {
+		t.Fatalf("ApplyDrift: %v", err)
+	}
+	outBytes, _ := os.ReadFile(fpath)
+	s := string(outBytes)
+
+	// Scalar attr should have inline comment on its line.
+	foundScalar := false
+	for _, line := range strings.Split(s, "\n") {
+		if strings.Contains(line, `"new"`) {
+			foundScalar = true
+			if !strings.Contains(line, "# updated name") {
+				t.Errorf("expected '# updated name' on name line, got: %q", line)
+			}
+			break
+		}
+	}
+	if !foundScalar {
+		t.Errorf("could not find 'new' in output:\n%s", s)
+	}
+
+	// List items should have inline comments.
+	for _, tc := range []struct{ val, comment string }{
+		{`"a"`, `# "a" tag`},
+		{`"b"`, `# "b" tag`},
+	} {
+		for _, line := range strings.Split(s, "\n") {
+			if strings.Contains(line, tc.val) {
+				if !strings.Contains(line, tc.comment) {
+					t.Errorf("expected %q on line with %q, got: %q", tc.comment, tc.val, line)
+				}
+				break
+			}
+		}
 	}
 }
 

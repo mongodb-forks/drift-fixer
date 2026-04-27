@@ -40,7 +40,16 @@ func RemoveResource(filePath, resourceType, resourceName string) (bool, error) {
 // resource identified by (resourceType, resourceName), and writes it back.
 // Only attributes where before != after are passed in driftedAttrs.
 // Returns true if any changes were written.
-func ApplyDrift(filePath, resourceType, resourceName string, driftedAttrs map[string]interface{}, verbose bool) (bool, error) {
+// syncCtx carries per-run context through syncBody and its helpers so that
+// individual functions do not need long parameter lists.
+type syncCtx struct {
+	verbose bool
+	rType   string      // resource type, e.g. "github_repository_ruleset"
+	rName   string      // resource name, e.g. "ruleset_15577636"
+	hook    CommentHook // may be nil
+}
+
+func ApplyDrift(filePath, resourceType, resourceName string, driftedAttrs map[string]interface{}, verbose bool, hook CommentHook) (bool, error) {
 	src, err := os.ReadFile(filePath)
 	if err != nil {
 		return false, fmt.Errorf("read %s: %w", filePath, err)
@@ -56,7 +65,8 @@ func ApplyDrift(filePath, resourceType, resourceName string, driftedAttrs map[st
 		return false, fmt.Errorf("resource %q %q not found in %s", resourceType, resourceName, filePath)
 	}
 
-	changed := syncBody(resourceBlock.Body(), driftedAttrs, verbose, "  ")
+	ctx := syncCtx{verbose: verbose, rType: resourceType, rName: resourceName, hook: hook}
+	changed := syncBody(resourceBlock.Body(), driftedAttrs, ctx, "  ", "")
 	if !changed {
 		return false, nil
 	}
@@ -82,11 +92,17 @@ func findResourceBlock(body *hclwrite.Body, rType, rName string) *hclwrite.Block
 }
 
 // syncBody applies driftedAttrs onto body. Returns true if anything changed.
-func syncBody(body *hclwrite.Body, attrs map[string]interface{}, verbose bool, indent string) bool {
+// path is the dot-separated attribute path from the resource root, e.g. "conditions.ref_name".
+func syncBody(body *hclwrite.Body, attrs map[string]interface{}, ctx syncCtx, indent, path string) bool {
 	changed := false
 	for key, val := range attrs {
 		if val == nil {
 			continue
+		}
+		// Build the path for this key.
+		childPath := key
+		if path != "" {
+			childPath = path + "." + key
 		}
 		// Empty slice: could be "zero-instance block type" (infra deleted all
 		// instances) OR a scalar list attribute being set to empty.
@@ -97,7 +113,7 @@ func syncBody(body *hclwrite.Body, attrs map[string]interface{}, verbose bool, i
 			if len(existing) > 0 {
 				for _, b := range existing {
 					body.RemoveBlock(b)
-					if verbose {
+					if ctx.verbose {
 						fmt.Printf("%s[block] removed %s (empty in infra)\n", indent, key)
 					}
 					changed = true
@@ -117,8 +133,8 @@ func syncBody(body *hclwrite.Body, attrs map[string]interface{}, verbose bool, i
 				// Block type entirely absent from config: add all instances from plan.
 				for i, blockData := range items {
 					target := body.AppendNewBlock(key, nil)
-					if syncBody(target.Body(), blockData, verbose, indent+"  ") {
-						if verbose {
+					if syncBody(target.Body(), blockData, ctx, indent+"  ", childPath) {
+						if ctx.verbose {
 							fmt.Printf("%s[block] added %s[%d]\n", indent, key, i)
 						}
 						changed = true
@@ -127,8 +143,8 @@ func syncBody(body *hclwrite.Body, attrs map[string]interface{}, verbose bool, i
 			} else {
 				// Block type already present. Sync by index up to min(existing, plan).
 				for i := 0; i < len(existing) && i < len(items); i++ {
-					if syncBody(existing[i].Body(), items[i], verbose, indent+"  ") {
-						if verbose {
+					if syncBody(existing[i].Body(), items[i], ctx, indent+"  ", childPath) {
+						if ctx.verbose {
 							fmt.Printf("%s[block] synced %s[%d]\n", indent, key, i)
 						}
 						changed = true
@@ -139,7 +155,7 @@ func syncBody(body *hclwrite.Body, attrs map[string]interface{}, verbose bool, i
 					// This happens when a block was deleted from infra.
 					for _, b := range existing[len(items):] {
 						body.RemoveBlock(b)
-						if verbose {
+						if ctx.verbose {
 							fmt.Printf("%s[block] removed excess %s (infra has fewer)\n", indent, key)
 						}
 						changed = true
@@ -149,13 +165,12 @@ func syncBody(body *hclwrite.Body, attrs map[string]interface{}, verbose bool, i
 				// (they removed some from config to delete them). Leave as-is.
 			}
 		} else {
-			// Scalar attribute — set using raw tokens so string lists get
-			// one-item-per-line formatting instead of a single long line.
-			if err := setAttributeVal(body, key, val); err != nil {
+			// Scalar attribute.
+			if err := setAttributeVal(body, key, val, ctx, childPath); err != nil {
 				fmt.Printf("%s[warn] skip %s: %v\n", indent, key, err)
 				continue
 			}
-			if verbose {
+			if ctx.verbose {
 				fmt.Printf("%s[attr] set %s = %v\n", indent, key, val)
 			}
 			changed = true
@@ -272,11 +287,11 @@ func extractItemComments(body *hclwrite.Body, key string) map[string]itemComment
 
 // setAttributeVal sets a scalar attribute on body. Lists with more than one
 // item are formatted one-item-per-line; everything else uses SetAttributeValue.
-// Comments present in the existing attribute are preserved by value content.
-func setAttributeVal(body *hclwrite.Body, key string, val interface{}) error {
+// Existing comments are preserved; the hook (if set) provides comments for new values.
+func setAttributeVal(body *hclwrite.Body, key string, val interface{}, ctx syncCtx, path string) error {
 	if lst, ok := val.([]interface{}); ok && len(lst) > 1 {
 		comments := extractItemComments(body, key)
-		toks, err := multilineListTokens(lst, comments)
+		toks, err := multilineListTokens(lst, comments, ctx, path)
 		if err == nil {
 			body.SetAttributeRaw(key, toks)
 			return nil
@@ -286,6 +301,20 @@ func setAttributeVal(body *hclwrite.Body, key string, val interface{}) error {
 	ctyVal, err := toCty(val)
 	if err != nil {
 		return err
+	}
+	// For scalar (non-list) attributes, ask the hook for a comment.
+	if ctx.hook != nil {
+		valToks := hclwrite.TokensForValue(ctyVal)
+		var keyBuf []byte
+		for _, vt := range valToks {
+			keyBuf = append(keyBuf, vt.Bytes...)
+		}
+		if comment := ctx.hook(ctx.rType, ctx.rName, path, strings.TrimSpace(string(keyBuf))); comment != "" {
+			body.SetAttributeRaw(key, append(valToks,
+				&hclwrite.Token{Type: hclsyntax.TokenComment, Bytes: []byte(" # " + comment + "\n")},
+			))
+			return nil
+		}
 	}
 	body.SetAttributeValue(key, ctyVal)
 	return nil
@@ -299,8 +328,10 @@ func setAttributeVal(body *hclwrite.Body, key string, val interface{}) error {
 //	  42,
 //	]
 //
-// comments maps rendered-value-string → itemComment (before lines + inline).
-func multilineListTokens(items []interface{}, comments map[string]itemComment) (hclwrite.Tokens, error) {
+// Existing comments (from extractItemComments) are preserved. For list items
+// that have no existing comment, the hook (if set) is asked for one.
+// path is the dot-separated attribute path of the list itself.
+func multilineListTokens(items []interface{}, comments map[string]itemComment, ctx syncCtx, path string) (hclwrite.Tokens, error) {
 	tok := func(t hclsyntax.TokenType, b string) *hclwrite.Token {
 		return &hclwrite.Token{Type: t, Bytes: []byte(b)}
 	}
@@ -320,6 +351,16 @@ func multilineListTokens(items []interface{}, comments map[string]itemComment) (
 		}
 		valKey := strings.TrimSpace(string(keyBuf))
 		c := comments[valKey]
+		// If no existing inline comment and hook is set, ask for one.
+		if c.inline == nil && ctx.hook != nil {
+			if hookComment := ctx.hook(ctx.rType, ctx.rName, path, valKey); hookComment != "" {
+				ct := &hclwrite.Token{
+					Type:  hclsyntax.TokenComment,
+					Bytes: []byte(" # " + hookComment + "\n"),
+				}
+				c.inline = ct
+			}
+		}
 		// Emit any preceding-line comments.
 		toks = append(toks, c.before...)
 		// Emit the value itself.
