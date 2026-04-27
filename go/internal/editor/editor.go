@@ -174,24 +174,17 @@ func blocksOfType(body *hclwrite.Body, blockType string) []*hclwrite.Block {
 	return out
 }
 
-// setAttributeVal sets a scalar attribute on body. String lists with more than
-// one item are formatted one-item-per-line; everything else uses SetAttributeValue.
+// setAttributeVal sets a scalar attribute on body. Lists with more than one
+// item are formatted one-item-per-line; everything else uses SetAttributeValue.
 func setAttributeVal(body *hclwrite.Body, key string, val interface{}) error {
 	if lst, ok := val.([]interface{}); ok && len(lst) > 1 {
-		// Check it's a string list (the only kind we multi-line format)
-		strs := make([]string, 0, len(lst))
-		for _, item := range lst {
-			s, ok := item.(string)
-			if !ok {
-				// Mixed/non-string list — fall through to SetAttributeValue
-				goto fallback
-			}
-			strs = append(strs, s)
+		toks, err := multilineListTokens(lst)
+		if err == nil {
+			body.SetAttributeRaw(key, toks)
+			return nil
 		}
-		body.SetAttributeRaw(key, multilineStringListTokens(strs))
-		return nil
+		// Fall through to SetAttributeValue on error
 	}
-fallback:
 	ctyVal, err := toCty(val)
 	if err != nil {
 		return err
@@ -200,13 +193,14 @@ fallback:
 	return nil
 }
 
-// multilineStringListTokens builds the hclwrite token sequence for:
+// multilineListTokens builds tokens for a multi-line list of any scalar type:
 //
 //	= [
 //	  "a",
-//	  "b",
+//	  42,
+//	  true,
 //	]
-func multilineStringListTokens(items []string) hclwrite.Tokens {
+func multilineListTokens(items []interface{}) (hclwrite.Tokens, error) {
 	tok := func(t hclsyntax.TokenType, b string) *hclwrite.Token {
 		return &hclwrite.Token{Type: t, Bytes: []byte(b)}
 	}
@@ -214,18 +208,20 @@ func multilineStringListTokens(items []string) hclwrite.Tokens {
 		tok(hclsyntax.TokenOBrack, "["),
 		tok(hclsyntax.TokenNewline, "\n"),
 	}
-	for _, s := range items {
+	for _, item := range items {
+		ctyVal, err := toCty(item)
+		if err != nil {
+			return nil, err
+		}
+		toks = append(toks, tok(hclsyntax.TokenIdent, "  "))
+		toks = append(toks, hclwrite.TokensForValue(ctyVal)...)
 		toks = append(toks,
-			tok(hclsyntax.TokenIdent, "  "),
-			tok(hclsyntax.TokenQuotedLit, `"`+s+`"`),
 			tok(hclsyntax.TokenComma, ","),
 			tok(hclsyntax.TokenNewline, "\n"),
 		)
 	}
-	toks = append(toks,
-		tok(hclsyntax.TokenCBrack, "]"),
-	)
-	return toks
+	toks = append(toks, tok(hclsyntax.TokenCBrack, "]"))
+	return toks, nil
 }
 
 // toBlockItems returns all map instances from a block value (map or list-of-maps).

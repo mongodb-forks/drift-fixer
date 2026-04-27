@@ -393,3 +393,23 @@ resource "github_repository_ruleset" "rs" {
 
 	assertContains(t, out, `"merge"`)
 }
+
+func TestMultilineIntListFormatting(t *testing.T) {
+	// A list of numbers with >1 items should also be written one-item-per-line.
+	input := `
+resource "example_resource" "r" {
+  ports = [80]
+}
+`
+	out := applyDriftToString(t, input, "example_resource", "r",
+		map[string]interface{}{
+			"ports": []interface{}{float64(80), float64(443), float64(8080)},
+		})
+
+	assertContains(t, out, "80,")
+	assertContains(t, out, "443,")
+	assertContains(t, out, "8080,")
+	if strings.Count(out, "\n") < strings.Count(input, "\n")+2 {
+		t.Errorf("expected multi-line int list, got:\n%s", out)
+	}
+}
