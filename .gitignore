@@ -155,3 +155,5 @@ ehthumbs.db
 Thumbs.db
 
 *.env
+
+/drift-fixer-go
