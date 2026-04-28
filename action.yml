@@ -113,7 +113,7 @@ runs:
     - name: Open pull request
       id: pr
       if: inputs.mode == 'pr' && steps.run.outputs.drift-detected == 'true'
-      uses: peter-evans/create-pull-request@v7
+      uses: mongodb-forks/create-pull-request@eec7ab75b2f71ddc8a223341c83a67f6f774c39f
       with:
         token: ${{ inputs.token }}
         branch: ${{ inputs.pr-branch != '' && inputs.pr-branch || format('drift-fixer/fix-{0}', github.run_id) }}
