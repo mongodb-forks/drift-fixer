@@ -51,6 +51,10 @@ func Run(projectDir, tfBin string, verbose bool) ([]ResourceDrift, error) {
 		return nil, fmt.Errorf("tofu show -json: %w", err)
 	}
 
+	// before_sensitive and after_unknown are polymorphic in Terraform/OpenTofu
+	// plan JSON: a bool when the entire resource value is (un)sensitive/known,
+	// an object when there is per-attribute info. Decode as interface{} and
+	// branch on the concrete type at use.
 	var planJSON struct {
 		ResourceChanges []struct {
 			Address string `json:"address"`
@@ -60,8 +64,8 @@ func Run(projectDir, tfBin string, verbose bool) ([]ResourceDrift, error) {
 				Actions         []string               `json:"actions"`
 				Before          map[string]interface{} `json:"before"`
 				After           map[string]interface{} `json:"after"`
-				AfterUnknown    map[string]interface{} `json:"after_unknown"`
-				BeforeSensitive map[string]interface{} `json:"before_sensitive"`
+				AfterUnknown    interface{}            `json:"after_unknown"`
+				BeforeSensitive interface{}            `json:"before_sensitive"`
 			} `json:"change"`
 		} `json:"resource_changes"`
 	}
@@ -101,18 +105,15 @@ func Run(projectDir, tfBin string, verbose bool) ([]ResourceDrift, error) {
 			continue
 		}
 
-		sensitiveKeys := sensitiveSet(ch.BeforeSensitive)
 		drifted := make(map[string]interface{})
 		for k, beforeVal := range ch.Before {
-			if sensitiveKeys[k] {
+			if isSensitive(ch.BeforeSensitive, k) {
 				continue
 			}
-			afterVal := ch.After[k]
-			if afterUnknown, ok := ch.AfterUnknown[k]; ok {
-				if b, ok := afterUnknown.(bool); ok && b {
-					continue // computed post-apply, skip
-				}
+			if isAfterUnknown(ch.AfterUnknown, k) {
+				continue // computed post-apply, skip
 			}
+			afterVal := ch.After[k]
 			if !deepEqual(beforeVal, afterVal) {
 				drifted[k] = beforeVal
 			}
@@ -130,21 +131,43 @@ func Run(projectDir, tfBin string, verbose bool) ([]ResourceDrift, error) {
 	return drifts, nil
 }
 
-func sensitiveSet(m map[string]interface{}) map[string]bool {
-	out := map[string]bool{}
-	for k, v := range m {
-		switch val := v.(type) {
+// isSensitive reports whether attribute key in a resource's before-state is
+// marked sensitive in the plan. The top-level value may be a bool (whole
+// resource is sensitive / not) or an object mapping attribute names to bool
+// or nested-object indicators.
+func isSensitive(sens interface{}, key string) bool {
+	switch v := sens.(type) {
+	case bool:
+		return v
+	case map[string]interface{}:
+		sub, ok := v[key]
+		if !ok {
+			return false
+		}
+		switch sv := sub.(type) {
 		case bool:
-			if val {
-				out[k] = true
-			}
+			return sv
 		case map[string]interface{}:
-			if len(val) > 0 {
-				out[k] = true
-			}
+			return len(sv) > 0
 		}
 	}
-	return out
+	return false
+}
+
+// isAfterUnknown reports whether attribute key will be computed post-apply.
+// after_unknown is bool when the entire after value is null/known, or an
+// object with per-attribute bools when after is a populated object.
+func isAfterUnknown(au interface{}, key string) bool {
+	m, ok := au.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	v, ok := m[key]
+	if !ok {
+		return false
+	}
+	b, ok := v.(bool)
+	return ok && b
 }
 
 // deepEqual does a JSON-normalized equality check.
