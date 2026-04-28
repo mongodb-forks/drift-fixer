@@ -51,6 +51,13 @@ func Run(projectDir, tfBin string, verbose bool) ([]ResourceDrift, error) {
 		return nil, fmt.Errorf("tofu show -json: %w", err)
 	}
 
+	return parsePlanJSON(showOut)
+}
+
+// parsePlanJSON extracts ResourceDrift entries from the JSON output of
+// `tofu show -json <plan>`. Split out from Run so it can be unit-tested
+// without invoking tofu.
+func parsePlanJSON(showOut []byte) ([]ResourceDrift, error) {
 	// before_sensitive and after_unknown are polymorphic in Terraform/OpenTofu
 	// plan JSON: a bool when the entire resource value is (un)sensitive/known,
 	// an object when there is per-attribute info. Decode as interface{} and
@@ -145,12 +152,30 @@ func Run(projectDir, tfBin string, verbose bool) ([]ResourceDrift, error) {
 	// console) appears in resource_drift with action=delete, but in
 	// resource_changes with action=create — which the loop above skips. Pick
 	// those up here so the editor can remove the corresponding block.
+	//
+	// Cross-reference resource_changes for the same address: only act when
+	// it plans to (re)create the resource. Without this guard, the post-fix
+	// validation plan re-emits the same delete (refresh always sees real
+	// infra is missing the resource), even though config has already been
+	// cleaned up — there is nothing left to fix.
+	createAddrs := make(map[string]bool)
+	for _, rc := range planJSON.ResourceChanges {
+		for _, a := range rc.Change.Actions {
+			if a == "create" {
+				createAddrs[rc.Address] = true
+				break
+			}
+		}
+	}
 	seen := make(map[string]bool, len(drifts))
 	for _, d := range drifts {
 		seen[d.Address] = true
 	}
 	for _, rd := range planJSON.ResourceDrift {
 		if seen[rd.Address] {
+			continue
+		}
+		if !createAddrs[rd.Address] {
 			continue
 		}
 		for _, a := range rd.Change.Actions {

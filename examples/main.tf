@@ -68,20 +68,15 @@ resource "github_repository_ruleset" "ruleset_15577636" {
       strict_required_status_checks_policy = false
     }
   }
-  bypass_actors {
-    actor_type  = "Integration"
-    bypass_mode = "exempt"
-    actor_id    = 1236702
-  }
 }
 
 
 resource "github_repository" "drift_test" {
   allow_auto_merge            = false
   allow_forking               = true
-  allow_merge_commit          = true
-  allow_rebase_merge          = true
-  allow_squash_merge          = true
+  allow_merge_commit          = false
+  allow_rebase_merge          = false
+  allow_squash_merge          = false
   allow_update_branch         = false
   archive_on_destroy          = null
   archived                    = false
@@ -98,13 +93,13 @@ resource "github_repository" "drift_test" {
   homepage_url                = ""
   is_template                 = false
   license_template            = null
-  merge_commit_message        = "PR_TITLE"
-  merge_commit_title          = "MERGE_MESSAGE"
+  merge_commit_message        = ""
+  merge_commit_title          = ""
   name                        = "drift-test"
   source_owner                = ""
   source_repo                 = ""
-  squash_merge_commit_message = "COMMIT_MESSAGES"
-  squash_merge_commit_title   = "COMMIT_OR_PR_TITLE"
+  squash_merge_commit_message = ""
+  squash_merge_commit_title   = ""
   topics                      = []
   visibility                  = "public"
   web_commit_signoff_required = false
