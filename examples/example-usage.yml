@@ -1,0 +1,32 @@
+name: Fix Terraform Drift
+
+# Example workflow showing how to use the drift-fixer action.
+# Copy this into your own repo's .github/workflows/ and adjust as needed.
+
+on:
+  schedule:
+    - cron: "0 6 * * *"   # daily at 06:00 UTC
+  workflow_dispatch:       # allow manual runs
+
+jobs:
+  fix-drift:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # needed to push commits / branches
+      pull-requests: write  # needed to open PRs
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Any provider setup goes here, e.g.:
+      # - uses: opentofu/setup-opentofu@v1
+
+      - name: Fix drift and open PR
+        uses: trevor159/drift-fixer@v1
+        with:
+          path: ./infra          # directory containing your .tf files
+          tf-bin: tofu           # or terraform
+          mode: pr               # pr | commit | dry-run
+          # pr-branch: drift-fixer/fix   # optional: fixed branch name
+          # pr-title: "chore: sync infra drift"
+          # commit-message: "chore: sync infra drift"
