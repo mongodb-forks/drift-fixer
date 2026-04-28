@@ -69,7 +69,24 @@ runs:
     - name: Initialize ${{ inputs.tf-bin }}
       shell: bash
       working-directory: ${{ inputs.path }}
-      run: ${{ inputs.tf-bin }} init
+      env:
+        TF_BIN: ${{ inputs.tf-bin }}
+      run: |
+        # Retry init to absorb transient registry/CDN failures (e.g. 502 from
+        # GitHub releases when fetching provider checksums).
+        attempt=1
+        max_attempts=3
+        delay=5
+        until "$TF_BIN" init; do
+          if [ "$attempt" -ge "$max_attempts" ]; then
+            echo "$TF_BIN init failed after $attempt attempts" >&2
+            exit 1
+          fi
+          echo "$TF_BIN init failed (attempt $attempt/$max_attempts); retrying in ${delay}s..." >&2
+          sleep "$delay"
+          attempt=$((attempt + 1))
+          delay=$((delay * 3))
+        done
 
     - name: Run drift-fixer
       id: run
