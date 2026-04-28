@@ -88,12 +88,6 @@ runs:
           delay=$((delay * 3))
         done
 
-        # Discard any platform-specific h1 hashes init appended to the lockfile.
-        # Otherwise they pollute git diff and ride along in the drift PR.
-        if [ -f .terraform.lock.hcl ]; then
-          git checkout -- .terraform.lock.hcl 2>/dev/null || true
-        fi
-
     - name: Run drift-fixer
       id: run
       shell: bash
@@ -117,6 +111,15 @@ runs:
         # In either case we do not want a partial PR/commit, so fail the run.
         if [ $EXIT_CODE -ne 0 ]; then
           exit $EXIT_CODE
+        fi
+
+        # Discard any platform-specific h1 hashes init appended to the lockfile
+        # so they don't pollute drift detection or ride along in the PR. Done
+        # after the binary runs because tofu plan needs the hash to validate
+        # the cached provider.
+        LOCKFILE="${{ inputs.path }}/.terraform.lock.hcl"
+        if [ -f "$LOCKFILE" ]; then
+          git checkout -- "$LOCKFILE" 2>/dev/null || true
         fi
 
         if git diff --quiet; then
