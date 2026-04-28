@@ -15,7 +15,9 @@ import (
 
 // RemoveResource removes the `resource "rType" "rName" { ... }` block from
 // filePath and writes the result back. Returns true if the block was found
-// and removed.
+// and removed. Also drops any `import` block whose `to` targets the same
+// resource — otherwise tofu plan fails with "Configuration for import target
+// does not exist".
 func RemoveResource(filePath, resourceType, resourceName string) (bool, error) {
 	src, err := os.ReadFile(filePath)
 	if err != nil {
@@ -30,10 +32,35 @@ func RemoveResource(filePath, resourceType, resourceName string) (bool, error) {
 		return false, nil
 	}
 	f.Body().RemoveBlock(block)
+	removeImportsTargeting(f.Body(), resourceType, resourceName)
 	if err := os.WriteFile(filePath, hclwrite.Format(f.Bytes()), 0644); err != nil {
 		return false, fmt.Errorf("write %s: %w", filePath, err)
 	}
 	return true, nil
+}
+
+// removeImportsTargeting drops `import { ... to = rType.rName ... }` blocks
+// (including indexed forms like rType.rName[0]) so that removing a resource
+// also cleans up any pending import for it.
+func removeImportsTargeting(body *hclwrite.Body, rType, rName string) {
+	target := rType + "." + rName
+	var toRemove []*hclwrite.Block
+	for _, block := range body.Blocks() {
+		if block.Type() != "import" {
+			continue
+		}
+		toAttr := block.Body().GetAttribute("to")
+		if toAttr == nil {
+			continue
+		}
+		expr := strings.TrimSpace(string(toAttr.Expr().BuildTokens(nil).Bytes()))
+		if expr == target || strings.HasPrefix(expr, target+"[") {
+			toRemove = append(toRemove, block)
+		}
+	}
+	for _, block := range toRemove {
+		body.RemoveBlock(block)
+	}
 }
 
 // ApplyDrift reads filePath, applies the drifted attribute values for the
