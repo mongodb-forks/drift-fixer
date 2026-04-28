@@ -68,6 +68,18 @@ func Run(projectDir, tfBin string, verbose bool) ([]ResourceDrift, error) {
 				BeforeSensitive interface{}            `json:"before_sensitive"`
 			} `json:"change"`
 		} `json:"resource_changes"`
+		// resource_drift reports state-vs-real-infra drift detected during
+		// refresh. We only need enough to spot resources that disappeared
+		// from real infra; full attribute drift is already handled via
+		// resource_changes above.
+		ResourceDrift []struct {
+			Address string `json:"address"`
+			Type    string `json:"type"`
+			Name    string `json:"name"`
+			Change  struct {
+				Actions []string `json:"actions"`
+			} `json:"change"`
+		} `json:"resource_drift"`
 	}
 	if err := json.Unmarshal(showOut, &planJSON); err != nil {
 		return nil, fmt.Errorf("parse plan JSON: %w", err)
@@ -127,6 +139,31 @@ func Run(projectDir, tfBin string, verbose bool) ([]ResourceDrift, error) {
 			ResourceName: rc.Name,
 			DriftedAttrs: drifted,
 		})
+	}
+
+	// A resource removed from real infra (e.g. deleted in a provider's web
+	// console) appears in resource_drift with action=delete, but in
+	// resource_changes with action=create — which the loop above skips. Pick
+	// those up here so the editor can remove the corresponding block.
+	seen := make(map[string]bool, len(drifts))
+	for _, d := range drifts {
+		seen[d.Address] = true
+	}
+	for _, rd := range planJSON.ResourceDrift {
+		if seen[rd.Address] {
+			continue
+		}
+		for _, a := range rd.Change.Actions {
+			if a == "delete" {
+				drifts = append(drifts, ResourceDrift{
+					Address:      rd.Address,
+					ResourceType: rd.Type,
+					ResourceName: rd.Name,
+					Delete:       true,
+				})
+				break
+			}
+		}
 	}
 	return drifts, nil
 }
