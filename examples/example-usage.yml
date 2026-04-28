@@ -18,8 +18,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Any provider setup goes here, e.g.:
-      # - uses: opentofu/setup-opentofu@v1
+      - name: Set up OpenTofu
+        uses: opentofu/setup-opentofu@v1
 
       - name: Fix drift and open PR
         uses: trevor159/drift-fixer@v1
