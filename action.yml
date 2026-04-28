@@ -88,6 +88,12 @@ runs:
           delay=$((delay * 3))
         done
 
+        # Discard any platform-specific h1 hashes init appended to the lockfile.
+        # Otherwise they pollute git diff and ride along in the drift PR.
+        if [ -f .terraform.lock.hcl ]; then
+          git checkout -- .terraform.lock.hcl 2>/dev/null || true
+        fi
+
     - name: Run drift-fixer
       id: run
       shell: bash
@@ -107,10 +113,9 @@ runs:
         EXIT_CODE=$?
         set -e
 
-        # Fail fast on hard errors (plan failure, file not found, etc.)
-        # Exit 1 from the binary means drift persists after attempted fixes,
-        # which we still want to surface. Distinguish by checking git diff.
-        if [ $EXIT_CODE -ne 0 ] && git diff --quiet; then
+        # Non-zero exit = hard error OR drift remained after attempted fixes.
+        # In either case we do not want a partial PR/commit, so fail the run.
+        if [ $EXIT_CODE -ne 0 ]; then
           exit $EXIT_CODE
         fi
 
