@@ -302,12 +302,15 @@ include = [
 
 ### Block operations
 
+Real infra is the source of truth: drift-fixer makes config match it
+exactly, regardless of which side has more or fewer blocks.
+
 | Operation | Behaviour |
 |---|---|
 | Add missing block | If a block type is entirely absent from config, all instances from infra are added |
 | Sync existing block | Attributes inside existing blocks are updated in-place |
-| Remove excess blocks | If infra has fewer instances than config, the extra config blocks are removed |
-| Preserve user-reduced count | If config has *fewer* blocks than infra, count is left alone (user is intentionally deleting them via Terraform) |
+| Append missing entries | If config has *fewer* instances of a repeated block than infra, the missing entries are appended |
+| Remove excess blocks | If config has *more* instances of a repeated block than infra, the extras are removed |
 | Remove empty block type | If infra returns `[]` and config has blocks of that type, all are removed |
 | Skip empty scalar list | If infra returns `[]` and no blocks of that type exist, it is ignored (not written as `= []`) |
 | Delete resource | If a resource is deleted from infra (`actions: ["delete"]`), the entire `resource {}` block is removed from config |
@@ -378,10 +381,6 @@ GitHub provider has been the primary test target.
   correct value).
 - **`after_unknown` attributes** — attributes whose post-change value is not
   known at plan time are skipped.
-- **User-managed deletions** — if you have *intentionally* fewer blocks in your
-  config than exist in infra (because you want Terraform to delete the extras on
-  the next apply), drift-fixer will not add them back. It detects this by
-  comparing config block count vs infra block count.
 - **Multiple resources with the same type+name** — only the first match in a
   file is edited. This is a theoretical edge case since Terraform requires unique
   addresses.

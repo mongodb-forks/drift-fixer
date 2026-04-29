@@ -273,27 +273,14 @@ resource "github_repository_ruleset" "rs" {
 	assertNotContains(t, out, "branch_name_pattern")
 }
 
-// TestBypassActorsValidationDriftRegression reproduces the exact scenario
-// from a real run against github_repository_ruleset where validation kept
-// reporting bypass_actors drift after drift-fixer "fixed" it.
+// TestBlockListAppendsMissingFromInfra reproduces the field scenario where
+// real infra had more bypass_actors than config: validation kept flagging
+// bypass_actors drift because drift-fixer was leaving config short.
 //
-// Setup mirrors the field report:
-//   - Config has 4 bypass_actors (the user's intended set, all RepositoryRole).
-//   - Real infra has 5: an extra `Integration` actor that the user removed
-//     from config; tofu apply would delete it on the next apply.
-//   - Crucially, the Integration actor is NOT at the end of infra's order —
-//     it's at position 0 — so an index-based sync does not just leave a
-//     dangling block at the tail. It overwrites the user's actual blocks.
-//
-// Without the fix, drift-fixer wrote infra's index 0 (Integration:935721)
-// onto config's index 0, infra's index 1 (RR:2) onto config's index 1, etc.
-// — leaving config with 4 blocks but the wrong contents, so the next
-// `tofu plan` re-detected the same one-block-extra drift.
-//
-// With the fix, drift-fixer recognises that config has fewer blocks than
-// infra (a user-managed change waiting on apply) and skips the attribute
-// entirely — config stays exactly as the user wrote it.
-func TestBypassActorsValidationDriftRegression(t *testing.T) {
+// Policy: real infra is the source of truth. When real infra has more
+// blocks than config, drift-fixer appends the missing entries so config
+// ends up with exactly the same set of blocks as real infra.
+func TestBlockListAppendsMissingFromInfra(t *testing.T) {
 	input := `
 resource "github_repository_ruleset" "rs" {
   bypass_actors {
@@ -319,8 +306,7 @@ resource "github_repository_ruleset" "rs" {
 }
 `
 	// Real-infra (plan's `before`) has the same 4 actors PLUS an Integration
-	// at position 0 — i.e. infra is a superset of config, and the extra is
-	// not last.
+	// at position 0 — five total.
 	out := applyDriftToString(t, input, "github_repository_ruleset", "rs",
 		map[string]interface{}{
 			"bypass_actors": []interface{}{
@@ -332,30 +318,22 @@ resource "github_repository_ruleset" "rs" {
 			},
 		})
 
-	// Block count stays at 4 — we do NOT add the Integration actor.
-	if got := strings.Count(out, "bypass_actors {"); got != 4 {
-		t.Errorf("expected 4 bypass_actors blocks in config, got %d:\n%s", got, out)
+	// Config now has 5 bypass_actors (matches real infra).
+	if got := strings.Count(out, "bypass_actors {"); got != 5 {
+		t.Errorf("expected 5 bypass_actors blocks in config (matching infra), got %d:\n%s", got, out)
 	}
-
-	// The Integration block must not appear under any guise.
-	assertNotContains(t, out, "Integration")
-	assertNotContains(t, out, "935721")
-
-	// All four user-intended actor_ids are still present, in the original order.
+	// The Integration entry from real infra is now in config.
+	assertContains(t, out, `actor_type  = "Integration"`)
+	assertContains(t, out, "actor_id    = 935721")
+	// All RepositoryRole entries are still present.
 	for _, id := range []string{"= 2", "= 5", "= 100", "= 200"} {
 		assertContains(t, out, "actor_id    "+id)
 	}
-	idxOf := func(s string) int { return strings.Index(out, "actor_id    "+s) }
-	if !(idxOf("= 2") < idxOf("= 5") && idxOf("= 5") < idxOf("= 100") && idxOf("= 100") < idxOf("= 200")) {
-		t.Errorf("actor_ids should remain in config's original order (2,5,100,200):\n%s", out)
-	}
 }
 
-func TestUserIntentionallyFewerBlocksThanInfra(t *testing.T) {
-	// Config has 1 bypass_actor, infra has 2 — user intentionally has fewer
-	// (wants to delete one). Tool should leave config alone: not add the
-	// missing block, and not overwrite the existing block's values with
-	// whatever happens to sit at infra's index 0.
+func TestBlockListAppendsSingleMissing(t *testing.T) {
+	// Config has 1 bypass_actor, infra has 2. drift-fixer should sync the
+	// existing block against infra[0] and append infra[1].
 	input := `
 resource "github_repository_ruleset" "rs" {
   bypass_actors {
@@ -372,14 +350,14 @@ resource "github_repository_ruleset" "rs" {
 			},
 		})
 
-	if strings.Count(out, "bypass_actors {") != 1 {
-		t.Errorf("expected config to still have 1 bypass_actors block, got:\n%s", out)
+	if got := strings.Count(out, "bypass_actors {"); got != 2 {
+		t.Errorf("expected 2 bypass_actors blocks in config (matching infra), got %d:\n%s", got, out)
 	}
-	assertNotContains(t, out, "actor_id = 200")
-	assertNotContains(t, out, "actor_id = 999")
-	// Original block must be preserved verbatim — no scrambling.
-	assertContains(t, out, "actor_id    = 100")
-	assertContains(t, out, `bypass_mode = "always"`)
+	// Both infra entries land in config.
+	assertContains(t, out, "actor_id    = 999")
+	assertContains(t, out, `bypass_mode = "exempt"`)
+	assertContains(t, out, "actor_id    = 200")
+	assertNotContains(t, out, "actor_id    = 100")
 }
 
 // ---------------------------------------------------------------------------

@@ -168,22 +168,10 @@ func syncBody(body *hclwrite.Body, attrs map[string]interface{}, ctx syncCtx, in
 					}
 				}
 			} else {
-				// Block type already present.
-				if len(existing) < len(items) {
-					// Config has fewer instances than infra. This is a
-					// user-managed change — they removed a block from config
-					// and apply will delete it from real infra to match.
-					// We must NOT pair the remaining blocks by index: real
-					// infra's ordering does not necessarily put the
-					// to-be-removed block last, so an index-pair sync would
-					// overwrite the user's blocks with arbitrary infra
-					// values and leave residual drift.
-					if ctx.verbose {
-						fmt.Printf("%s[block] skip %s sync (user-managed: config=%d, infra=%d)\n", indent, key, len(existing), len(items))
-					}
-					continue
-				}
-				// existing >= items: sync by index, then trim excess.
+				// Block type already present. Real infra is the source of
+				// truth: sync matching pairs by index, then trim excess
+				// from config or append missing entries so config ends up
+				// with exactly the same set of blocks as real infra.
 				for i := 0; i < len(existing) && i < len(items); i++ {
 					if syncBody(existing[i].Body(), items[i], ctx, indent+"  ", childPath) {
 						if ctx.verbose {
@@ -193,12 +181,24 @@ func syncBody(body *hclwrite.Body, attrs map[string]interface{}, ctx syncCtx, in
 					}
 				}
 				if len(existing) > len(items) {
-					// Config has more instances than infra — remove the excess.
-					// This happens when a block was deleted from infra.
+					// Config has more instances than infra — remove the
+					// excess.
 					for _, b := range existing[len(items):] {
 						body.RemoveBlock(b)
 						if ctx.verbose {
 							fmt.Printf("%s[block] removed excess %s (infra has fewer)\n", indent, key)
+						}
+						changed = true
+					}
+				} else if len(items) > len(existing) {
+					// Config has fewer instances than infra — append the
+					// missing entries so config matches real infra.
+					for i := len(existing); i < len(items); i++ {
+						target := body.AppendNewBlock(key, nil)
+						if syncBody(target.Body(), items[i], ctx, indent+"  ", childPath) {
+							if ctx.verbose {
+								fmt.Printf("%s[block] appended %s[%d]\n", indent, key, i)
+							}
 						}
 						changed = true
 					}

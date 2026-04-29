@@ -269,6 +269,94 @@ func TestParsePlanJSON_NewResourceNotDrift(t *testing.T) {
 	}
 }
 
+// TestParsePlanJSON_BlockListSupersetEmitted: when real infra has more
+// block instances than config (e.g. a bypass_actor that exists in real
+// infra but not in config), the planner must emit the drift so the editor
+// can append the missing entries. Real infra is the source of truth.
+func TestParsePlanJSON_BlockListSupersetEmitted(t *testing.T) {
+	in := []byte(`{
+		"resource_changes": [{
+			"address": "github_repository_ruleset.rs",
+			"type": "github_repository_ruleset",
+			"name": "rs",
+			"change": {
+				"actions": ["update"],
+				"before": {
+					"name": "rs",
+					"bypass_actors": [
+						{"actor_id": 935721, "actor_type": "Integration", "bypass_mode": "always"},
+						{"actor_id": 2, "actor_type": "RepositoryRole", "bypass_mode": "always"},
+						{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}
+					]
+				},
+				"after": {
+					"name": "rs",
+					"bypass_actors": [
+						{"actor_id": 2, "actor_type": "RepositoryRole", "bypass_mode": "always"},
+						{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}
+					]
+				},
+				"before_sensitive": {},
+				"after_unknown": {}
+			}
+		}]
+	}`)
+	drifts, err := parsePlanJSON(in)
+	if err != nil {
+		t.Fatalf("parsePlanJSON: %v", err)
+	}
+	if len(drifts) != 1 {
+		t.Fatalf("expected 1 drift (real infra has more blocks than config), got %d", len(drifts))
+	}
+	got, ok := drifts[0].DriftedAttrs["bypass_actors"].([]interface{})
+	if !ok {
+		t.Fatalf("expected bypass_actors as []interface{} in DriftedAttrs, got %T", drifts[0].DriftedAttrs["bypass_actors"])
+	}
+	if len(got) != 3 {
+		t.Errorf("expected DriftedAttrs[bypass_actors] to carry all 3 infra entries, got %d", len(got))
+	}
+}
+
+// TestParsePlanJSON_BlockListExcessInConfigStillEmitted: when real infra
+// has FEWER block instances than config, that's the documented "Remove
+// excess blocks" case — the editor will trim config to match. The planner
+// must still emit this as drift so the editor runs.
+func TestParsePlanJSON_BlockListExcessInConfigStillEmitted(t *testing.T) {
+	in := []byte(`{
+		"resource_changes": [{
+			"address": "github_repository_ruleset.rs",
+			"type": "github_repository_ruleset",
+			"name": "rs",
+			"change": {
+				"actions": ["update"],
+				"before": {
+					"bypass_actors": [
+						{"actor_id": 2, "actor_type": "RepositoryRole", "bypass_mode": "always"}
+					]
+				},
+				"after": {
+					"bypass_actors": [
+						{"actor_id": 2, "actor_type": "RepositoryRole", "bypass_mode": "always"},
+						{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}
+					]
+				},
+				"before_sensitive": {},
+				"after_unknown": {}
+			}
+		}]
+	}`)
+	drifts, err := parsePlanJSON(in)
+	if err != nil {
+		t.Fatalf("parsePlanJSON: %v", err)
+	}
+	if len(drifts) != 1 {
+		t.Fatalf("expected 1 drift (config has excess block to remove), got %d", len(drifts))
+	}
+	if _, ok := drifts[0].DriftedAttrs["bypass_actors"]; !ok {
+		t.Errorf("expected bypass_actors in DriftedAttrs, got %+v", drifts[0].DriftedAttrs)
+	}
+}
+
 // TestParsePlanJSON_NoOpNoDrift: a resource_changes entry with action=no-op
 // (or just before==after on update) should produce no drift.
 func TestParsePlanJSON_NoOpNoDrift(t *testing.T) {
