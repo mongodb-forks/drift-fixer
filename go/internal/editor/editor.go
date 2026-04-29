@@ -168,7 +168,22 @@ func syncBody(body *hclwrite.Body, attrs map[string]interface{}, ctx syncCtx, in
 					}
 				}
 			} else {
-				// Block type already present. Sync by index up to min(existing, plan).
+				// Block type already present.
+				if len(existing) < len(items) {
+					// Config has fewer instances than infra. This is a
+					// user-managed change — they removed a block from config
+					// and apply will delete it from real infra to match.
+					// We must NOT pair the remaining blocks by index: real
+					// infra's ordering does not necessarily put the
+					// to-be-removed block last, so an index-pair sync would
+					// overwrite the user's blocks with arbitrary infra
+					// values and leave residual drift.
+					if ctx.verbose {
+						fmt.Printf("%s[block] skip %s sync (user-managed: config=%d, infra=%d)\n", indent, key, len(existing), len(items))
+					}
+					continue
+				}
+				// existing >= items: sync by index, then trim excess.
 				for i := 0; i < len(existing) && i < len(items); i++ {
 					if syncBody(existing[i].Body(), items[i], ctx, indent+"  ", childPath) {
 						if ctx.verbose {
@@ -188,8 +203,6 @@ func syncBody(body *hclwrite.Body, attrs map[string]interface{}, ctx syncCtx, in
 						changed = true
 					}
 				}
-				// If existing < items: user intentionally has fewer blocks than infra
-				// (they removed some from config to delete them). Leave as-is.
 			}
 		} else {
 			// Scalar attribute.

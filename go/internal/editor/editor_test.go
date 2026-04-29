@@ -273,9 +273,89 @@ resource "github_repository_ruleset" "rs" {
 	assertNotContains(t, out, "branch_name_pattern")
 }
 
+// TestBypassActorsValidationDriftRegression reproduces the exact scenario
+// from a real run against github_repository_ruleset where validation kept
+// reporting bypass_actors drift after drift-fixer "fixed" it.
+//
+// Setup mirrors the field report:
+//   - Config has 4 bypass_actors (the user's intended set, all RepositoryRole).
+//   - Real infra has 5: an extra `Integration` actor that the user removed
+//     from config; tofu apply would delete it on the next apply.
+//   - Crucially, the Integration actor is NOT at the end of infra's order —
+//     it's at position 0 — so an index-based sync does not just leave a
+//     dangling block at the tail. It overwrites the user's actual blocks.
+//
+// Without the fix, drift-fixer wrote infra's index 0 (Integration:935721)
+// onto config's index 0, infra's index 1 (RR:2) onto config's index 1, etc.
+// — leaving config with 4 blocks but the wrong contents, so the next
+// `tofu plan` re-detected the same one-block-extra drift.
+//
+// With the fix, drift-fixer recognises that config has fewer blocks than
+// infra (a user-managed change waiting on apply) and skips the attribute
+// entirely — config stays exactly as the user wrote it.
+func TestBypassActorsValidationDriftRegression(t *testing.T) {
+	input := `
+resource "github_repository_ruleset" "rs" {
+  bypass_actors {
+    actor_id    = 2
+    actor_type  = "RepositoryRole"
+    bypass_mode = "always"
+  }
+  bypass_actors {
+    actor_id    = 5
+    actor_type  = "RepositoryRole"
+    bypass_mode = "always"
+  }
+  bypass_actors {
+    actor_id    = 100
+    actor_type  = "RepositoryRole"
+    bypass_mode = "always"
+  }
+  bypass_actors {
+    actor_id    = 200
+    actor_type  = "RepositoryRole"
+    bypass_mode = "always"
+  }
+}
+`
+	// Real-infra (plan's `before`) has the same 4 actors PLUS an Integration
+	// at position 0 — i.e. infra is a superset of config, and the extra is
+	// not last.
+	out := applyDriftToString(t, input, "github_repository_ruleset", "rs",
+		map[string]interface{}{
+			"bypass_actors": []interface{}{
+				map[string]interface{}{"actor_id": float64(935721), "actor_type": "Integration", "bypass_mode": "always"},
+				map[string]interface{}{"actor_id": float64(2), "actor_type": "RepositoryRole", "bypass_mode": "always"},
+				map[string]interface{}{"actor_id": float64(5), "actor_type": "RepositoryRole", "bypass_mode": "always"},
+				map[string]interface{}{"actor_id": float64(100), "actor_type": "RepositoryRole", "bypass_mode": "always"},
+				map[string]interface{}{"actor_id": float64(200), "actor_type": "RepositoryRole", "bypass_mode": "always"},
+			},
+		})
+
+	// Block count stays at 4 — we do NOT add the Integration actor.
+	if got := strings.Count(out, "bypass_actors {"); got != 4 {
+		t.Errorf("expected 4 bypass_actors blocks in config, got %d:\n%s", got, out)
+	}
+
+	// The Integration block must not appear under any guise.
+	assertNotContains(t, out, "Integration")
+	assertNotContains(t, out, "935721")
+
+	// All four user-intended actor_ids are still present, in the original order.
+	for _, id := range []string{"= 2", "= 5", "= 100", "= 200"} {
+		assertContains(t, out, "actor_id    "+id)
+	}
+	idxOf := func(s string) int { return strings.Index(out, "actor_id    "+s) }
+	if !(idxOf("= 2") < idxOf("= 5") && idxOf("= 5") < idxOf("= 100") && idxOf("= 100") < idxOf("= 200")) {
+		t.Errorf("actor_ids should remain in config's original order (2,5,100,200):\n%s", out)
+	}
+}
+
 func TestUserIntentionallyFewerBlocksThanInfra(t *testing.T) {
 	// Config has 1 bypass_actor, infra has 2 — user intentionally has fewer
-	// (wants to delete one). Tool should only update index[0], not add index[1].
+	// (wants to delete one). Tool should leave config alone: not add the
+	// missing block, and not overwrite the existing block's values with
+	// whatever happens to sit at infra's index 0.
 	input := `
 resource "github_repository_ruleset" "rs" {
   bypass_actors {
@@ -287,7 +367,7 @@ resource "github_repository_ruleset" "rs" {
 	out := applyDriftToString(t, input, "github_repository_ruleset", "rs",
 		map[string]interface{}{
 			"bypass_actors": []interface{}{
-				map[string]interface{}{"actor_id": float64(100), "bypass_mode": "exempt"},
+				map[string]interface{}{"actor_id": float64(999), "bypass_mode": "exempt"},
 				map[string]interface{}{"actor_id": float64(200), "bypass_mode": "always"},
 			},
 		})
@@ -296,6 +376,10 @@ resource "github_repository_ruleset" "rs" {
 		t.Errorf("expected config to still have 1 bypass_actors block, got:\n%s", out)
 	}
 	assertNotContains(t, out, "actor_id = 200")
+	assertNotContains(t, out, "actor_id = 999")
+	// Original block must be preserved verbatim — no scrambling.
+	assertContains(t, out, "actor_id    = 100")
+	assertContains(t, out, `bypass_mode = "always"`)
 }
 
 // ---------------------------------------------------------------------------
