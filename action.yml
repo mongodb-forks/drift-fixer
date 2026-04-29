@@ -27,6 +27,10 @@ inputs:
         dry-run — detect and report drift without writing any files or opening a PR
     required: false
     default: pr
+  pr-base:
+    description: Base branch the pull request should target. Defaults to the repository's default branch, which is required when the workflow runs on a detached HEAD (the usual case for scheduled runs).
+    required: false
+    default: ${{ github.event.repository.default_branch }}
   pr-branch:
     description: Branch name to use when mode is 'pr'. Defaults to drift-fixer/fix-<run_id>.
     required: false
@@ -150,6 +154,7 @@ runs:
       uses: mongodb-forks/create-pull-request@eec7ab75b2f71ddc8a223341c83a67f6f774c39f
       with:
         token: ${{ inputs.token }}
+        base: ${{ inputs.pr-base }}
         branch: ${{ inputs.pr-branch != '' && inputs.pr-branch || format('drift-fixer/fix-{0}', github.run_id) }}
         commit-message: ${{ inputs.commit-message }}
         title: ${{ inputs.pr-title }}

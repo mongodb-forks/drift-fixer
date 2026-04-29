@@ -81,6 +81,7 @@ never ship.
 | `tf-bin` | `tofu` | Binary used for plan/init. Set to `terraform` for Terraform. |
 | `mode` | `pr` | `pr` opens a pull request, `commit` pushes directly to the current branch, `dry-run` reports without writing. |
 | `verbose` | `false` | Print every attribute and block change as it is applied. |
+| `pr-base` | repository default branch | Base branch the PR targets. Required when the workflow runs on a detached HEAD (e.g. scheduled runs); the default is usually correct. |
 | `pr-branch` | `drift-fixer/fix-<run_id>` | Branch name used in `mode: pr`. |
 | `pr-title` | `fix: sync Terraform config with infrastructure drift` | Pull request title. |
 | `pr-draft` | `true` | Open the PR as a draft. Set to `"false"` for ready-for-review. |
