@@ -35,6 +35,10 @@ inputs:
     description: Title of the pull request when mode is 'pr'.
     required: false
     default: "fix: sync Terraform config with infrastructure drift"
+  pr-draft:
+    description: Open the pull request as a draft (true) or ready-for-review (false).
+    required: false
+    default: "true"
   commit-message:
     description: Commit message used for both 'commit' and 'pr' modes.
     required: false
@@ -156,3 +160,4 @@ runs:
 
           > Triggered by workflow run [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
         delete-branch: true
+        draft: ${{ inputs.pr-draft }}

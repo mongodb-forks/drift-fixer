@@ -12,6 +12,7 @@ Written in Go. No external CLI tools required — HCL is edited directly via the
 
 ## Table of Contents
 
+- [Use as a GitHub Action](#use-as-a-github-action)
 - [How It Works](#how-it-works)
 - [Building](#building)
 - [Usage](#usage)
@@ -24,12 +25,100 @@ Written in Go. No external CLI tools required — HCL is edited directly via the
 
 ---
 
+## Use as a GitHub Action
+
+This repository ships a composite action that builds the drift-fixer binary,
+runs it against your Terraform/OpenTofu config, and either opens a pull
+request, commits directly, or just reports drift.
+
+### Quick start
+
+```yaml
+name: Fix Terraform Drift
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+jobs:
+  fix-drift:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # push branches / commits
+      pull-requests: write  # open PRs
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: opentofu/setup-opentofu@v1
+      - uses: mongodb-forks/drift-fixer@master
+        with:
+          path: ./infra
+          mode: pr
+```
+
+A complete example workflow is in [`examples/example-usage.yml`](examples/example-usage.yml).
+
+### Steps the action runs
+
+1. Sets up Go and builds the drift-fixer binary from the action's source.
+2. Runs `tofu init` (or `terraform init`) in `path`, retrying up to 3
+   attempts with exponential backoff to absorb transient registry/CDN 502s.
+3. Runs the binary, which produces drift fixes in `.tf` files.
+4. Reverts any platform-specific h1 hashes `init` appended to
+   `.terraform.lock.hcl` so they don't ride along in the PR.
+5. Depending on `mode`, opens a PR, commits in place, or just reports.
+
+The step fails the workflow on any non-zero exit from the binary — including
+the case where drift remained after the fix attempt — so partial-state PRs
+never ship.
+
+### Inputs
+
+| Name | Default | Description |
+|---|---|---|
+| `path` | `.` | Directory containing your `.tf` files. |
+| `tf-bin` | `tofu` | Binary used for plan/init. Set to `terraform` for Terraform. |
+| `mode` | `pr` | `pr` opens a pull request, `commit` pushes directly to the current branch, `dry-run` reports without writing. |
+| `verbose` | `false` | Print every attribute and block change as it is applied. |
+| `pr-branch` | `drift-fixer/fix-<run_id>` | Branch name used in `mode: pr`. |
+| `pr-title` | `fix: sync Terraform config with infrastructure drift` | Pull request title. |
+| `pr-draft` | `true` | Open the PR as a draft. Set to `"false"` for ready-for-review. |
+| `commit-message` | `fix: sync Terraform config with infrastructure drift` | Commit message used in both `pr` and `commit` modes. |
+| `token` | `${{ github.token }}` | Token with permission to push branches and open PRs. |
+
+### Outputs
+
+| Name | Description |
+|---|---|
+| `drift-detected` | `'true'` if drift was found (and fixed), `'false'` otherwise. |
+| `pr-url` | URL of the opened PR when `mode: pr`. Empty otherwise. |
+
+### Modes
+
+- **`pr`** — fix drift on a new branch, open a (by default) draft PR. The PR
+  is only opened when the post-fix validation plan reports no remaining drift.
+- **`commit`** — fix drift and push directly to the current branch using the
+  configured commit message. No PR is opened.
+- **`dry-run`** — run plan and report what would change without writing
+  anything. The action never opens a PR or commits in this mode.
+
+---
+
 ## How It Works
 
 1. **Plan** — runs `tofu plan -out <tmp>` then `tofu show -json <tmp>` in the
-   target directory. Reads `resource_changes[*].change.{before,after}` from the
-   JSON output and diffs every attribute. Only attributes where `before != after`
-   are collected into a `ResourceDrift`.
+   target directory. Reads two arrays from the JSON output:
+   - `resource_changes[*].change.{before,after}` — for each `update`/`replace`,
+     diffs every attribute and collects keys where `before != after` into a
+     `ResourceDrift`. The post-refresh `before` value (real infra) is what
+     gets written back to config.
+   - `resource_drift[*]` — surfaces resources that disappeared from real
+     infra (e.g. deleted via a provider's web console). These appear in
+     `resource_changes` as `create`, which the loop above skips, so the
+     planner cross-references and emits a `Delete: true` drift only when
+     `resource_changes` plans to recreate the resource (i.e. config still
+     has the block).
 
 2. **Find** — parses every `.tf` file in the project directory using the
    `hclsyntax` AST to locate which file contains each drifted resource block.
@@ -39,7 +128,8 @@ Written in Go. No external CLI tools required — HCL is edited directly via the
    - Scalar attributes are set with `SetAttributeValue` / `SetAttributeRaw`.
    - List attributes with more than one item are formatted one-item-per-line.
    - Block-typed values (nested blocks) are recursively synced.
-   - Resources deleted from infra are removed from config entirely.
+   - Resources deleted from infra are removed from config entirely, along
+     with any `import { to = <addr> }` block targeting them.
    - The output is run through `hclwrite.Format` (equivalent to `tofu fmt`).
 
 4. **Validate** — runs a second plan. If no drift remains, exits 0. If drift
@@ -305,27 +395,29 @@ GitHub provider has been the primary test target.
 
 ## Testing
 
-All tests are in `go/internal/editor/` and use only the standard library
+All unit tests live under `go/internal/` and use only the standard library
 (`testing` package). No real cloud credentials or live API calls are made.
 
 ```bash
-# Run all tests (67 tests across 2 files)
+# Run everything (75 tests across 3 files)
 cd go
-GOTOOLCHAIN=local go test ./internal/editor/ -v
-
-# Run a specific test
-GOTOOLCHAIN=local go test ./internal/editor/ -v -run TestBypassActorModeChange
-
-# Run all packages
 GOTOOLCHAIN=local go test ./...
+
+# Just the editor or planner suites
+GOTOOLCHAIN=local go test ./internal/editor/ -v
+GOTOOLCHAIN=local go test ./internal/planner/ -v
+
+# Run a specific test by name
+GOTOOLCHAIN=local go test ./internal/editor/ -v -run TestBypassActorModeChange
 ```
 
 ### Test files
 
 | File | Count | Coverage |
 |---|---|---|
-| `editor_test.go` | 18 tests | Core edit operations, multi-line lists, comment preservation, hook |
-| `editor_extended_test.go` | 49 tests | GitHub provider shapes, list mutations, deep nesting, every comment edge case, hook path verification |
+| `internal/editor/editor_test.go` | 18 | Core edit operations, multi-line lists, comment preservation, hook |
+| `internal/editor/editor_extended_test.go` | 48 | GitHub provider shapes, list mutations, deep nesting, comment edge cases, hook path verification |
+| `internal/planner/planner_test.go` | 9 | Plan-JSON parsing: attribute drift, polymorphic `before_sensitive`/`after_unknown`, sensitive-attr filtering, resource_drift delete handling, post-fix validation idempotency |
 
 ### Integration test (`test.sh`)
 
@@ -355,10 +447,12 @@ The script:
 
 ```
 drift-fixer/
+├── action.yml              # composite GitHub Action definition
 ├── drift-fixer-go          # compiled binary (gitignored)
 ├── test.sh                 # integration test script
 ├── examples/
-│   └── main.tf             # test fixture (github provider resources)
+│   ├── main.tf             # test fixture (github provider resources)
+│   └── example-usage.yml   # workflow consumers can copy into their repo
 └── go/
     ├── go.mod
     ├── go.sum
@@ -367,25 +461,30 @@ drift-fixer/
     │       └── main.go     # CLI entry point: flags, orchestration, validate
     └── internal/
         ├── planner/
-        │   └── planner.go  # runs plan+show-json, diffs before/after, returns ResourceDrift list
+        │   ├── planner.go      # runs plan+show-json, parses plan JSON, returns ResourceDrift list
+        │   └── planner_test.go # unit tests for parsePlanJSON
         ├── finder/
-        │   └── finder.go   # parses .tf AST to locate which file contains each resource
+        │   └── finder.go       # parses .tf AST to locate which file contains each resource
         └── editor/
-            ├── editor.go       # hclwrite-based editor: ApplyDrift, RemoveResource, syncBody
-            ├── hook.go         # CommentHook type + DRIFT_FIXER_COMMENT_SCRIPT loader
+            ├── editor.go               # hclwrite-based editor: ApplyDrift, RemoveResource, syncBody
+            ├── hook.go                 # CommentHook type + DRIFT_FIXER_COMMENT_SCRIPT loader
             ├── editor_test.go          # core unit tests (18)
-            └── editor_extended_test.go # extended GitHub provider tests (49)
+            └── editor_extended_test.go # extended GitHub provider tests (48)
 ```
 
 ### Package responsibilities
 
 **`planner`**
 - Runs `<tf-bin> plan -out <tmp>` followed by `<tf-bin> show -json <tmp>`.
-- Iterates `resource_changes` in the JSON output.
-- For `delete` actions: returns `ResourceDrift{Delete: true}`.
-- For `update`/`replace` actions: walks `change.before` vs `change.after`,
-  collects every key where the values differ, skips sensitive keys and
-  `after_unknown` markers.
+- `parsePlanJSON` (unit-tested independently of tofu) does the analysis:
+  - `resource_changes` `update`/`replace` → walks `change.before` vs
+    `change.after`, collects every key where the values differ; skips
+    sensitive keys and `after_unknown` markers.
+  - `resource_changes` `delete` → emits `ResourceDrift{Delete: true}`.
+  - `resource_drift` `delete` → emits `ResourceDrift{Delete: true}` *only*
+    when `resource_changes` for the same address plans `create` (i.e. config
+    still has the block). Without this guard, the post-fix validation plan
+    would re-flag the same delete every time refresh runs.
 
 **`finder`**
 - Walks the project directory for `*.tf` files.
@@ -395,7 +494,9 @@ drift-fixer/
 **`editor`**
 - `ApplyDrift` — main entry point; opens file, finds resource block, calls
   `syncBody`, writes formatted output.
-- `RemoveResource` — removes the entire `resource {}` block.
+- `RemoveResource` — removes the entire `resource {}` block, plus any
+  `import { to = <addr> }` block in the same file targeting it (otherwise
+  tofu plan errors with "Configuration for import target does not exist").
 - `syncBody` — recursive; handles empty lists, block vs scalar distinction,
   block count policy, path accumulation for hooks.
 - `setAttributeVal` — scalar/list writer; extracts and re-injects comments;

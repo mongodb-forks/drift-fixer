@@ -22,11 +22,13 @@ jobs:
         uses: opentofu/setup-opentofu@v1
 
       - name: Fix drift and open PR
-        uses: trevor159/drift-fixer@v1
+        uses: mongodb-forks/drift-fixer@master
         with:
           path: ./infra          # directory containing your .tf files
           tf-bin: tofu           # or terraform
           mode: pr               # pr | commit | dry-run
-          # pr-branch: drift-fixer/fix   # optional: fixed branch name
+          # verbose: "true"               # log every attribute change
+          # pr-draft: "false"             # ready-for-review instead of draft
+          # pr-branch: drift-fixer/fix    # fixed branch name (default is per-run)
           # pr-title: "chore: sync infra drift"
           # commit-message: "chore: sync infra drift"

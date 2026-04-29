@@ -21,54 +21,7 @@ import {
   id = "drift-test"
 }
 
-import {
-  to = github_repository_ruleset.ruleset_15577636
-  id = "drift-test:15577636"
-}
 
-resource "github_repository_ruleset" "ruleset_15577636" {
-  enforcement = "disabled"
-  name        = "main"
-  repository  = "drift-test"
-  target      = "branch"
-  conditions {
-    ref_name {
-      exclude = []
-      include = [
-        #test
-        "~DEFAULT_BRANCH", # test comment
-        //poo poo
-        "refs/heads/meep", # test comment 3
-        "refs/heads/will the comments stay?",
-      ]
-    }
-  }
-  rules {
-    creation                      = false
-    deletion                      = true
-    non_fast_forward              = true
-    required_linear_history       = false
-    required_signatures           = false
-    update                        = false
-    update_allows_fetch_and_merge = false
-    pull_request {
-      allowed_merge_methods             = ["merge", "squash", "rebase"]
-      dismiss_stale_reviews_on_push     = false
-      require_code_owner_review         = false
-      require_last_push_approval        = false
-      required_approving_review_count   = 1
-      required_review_thread_resolution = false
-    }
-    required_status_checks {
-      do_not_enforce_on_create = false
-      required_check {
-        context        = "test_check"
-        integration_id = 0
-      }
-      strict_required_status_checks_policy = false
-    }
-  }
-}
 
 
 resource "github_repository" "drift_test" {
