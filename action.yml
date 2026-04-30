@@ -47,6 +47,19 @@ inputs:
     description: Commit message used for both 'commit' and 'pr' modes.
     required: false
     default: "fix: sync Terraform config with infrastructure drift"
+  git-user-name:
+    description: |
+      Name configured as commit author/committer in 'commit' mode. Override this
+      when pushing as a GitHub App so the commit is attributed to the app — e.g.
+      "my-bot[bot]".
+    required: false
+    default: "github-actions[bot]"
+  git-user-email:
+    description: |
+      Email configured as commit author/committer in 'commit' mode. For GitHub
+      Apps the convention is "<app-id>+<app-slug>[bot]@users.noreply.github.com".
+    required: false
+    default: "github-actions[bot]@users.noreply.github.com"
   token:
     description: GitHub token used to push branches and open PRs. Defaults to the built-in GITHUB_TOKEN.
     required: false
@@ -142,8 +155,8 @@ runs:
       env:
         GH_TOKEN: ${{ inputs.token }}
       run: |
-        git config user.name  "github-actions[bot]"
-        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git config user.name  "${{ inputs.git-user-name }}"
+        git config user.email "${{ inputs.git-user-email }}"
         git add -A
         git commit -m "${{ inputs.commit-message }}"
         git push

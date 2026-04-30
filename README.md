@@ -57,7 +57,9 @@ jobs:
           mode: pr
 ```
 
-A complete example workflow is in [`examples/example-usage.yml`](examples/example-usage.yml).
+Complete example workflows:
+- [`examples/example-usage.yml`](examples/example-usage.yml) — `pr` mode with the default `GITHUB_TOKEN`.
+- [`examples/example-usage-app-commit.yml`](examples/example-usage-app-commit.yml) — `commit` mode pushing as a GitHub App (for branch-ruleset bypass).
 
 ### Steps the action runs
 
@@ -86,7 +88,9 @@ never ship.
 | `pr-title` | `fix: sync Terraform config with infrastructure drift` | Pull request title. |
 | `pr-draft` | `true` | Open the PR as a draft. Set to `"false"` for ready-for-review. |
 | `commit-message` | `fix: sync Terraform config with infrastructure drift` | Commit message used in both `pr` and `commit` modes. |
-| `token` | `${{ github.token }}` | Token with permission to push branches and open PRs. |
+| `git-user-name` | `github-actions[bot]` | Commit author/committer name in `commit` mode. Override when pushing as a GitHub App. |
+| `git-user-email` | `github-actions[bot]@users.noreply.github.com` | Commit author/committer email in `commit` mode. |
+| `token` | `${{ github.token }}` | Token used for `gh` CLI calls (e.g. PR creation). For push auth, see "Pushing as a GitHub App" below. |
 
 ### Outputs
 
@@ -103,6 +107,42 @@ never ship.
   configured commit message. No PR is opened.
 - **`dry-run`** — run plan and report what would change without writing
   anything. The action never opens a PR or commits in this mode.
+
+### Pushing as a GitHub App
+
+When you need the commit to come from a GitHub App — typically so the App can
+be added to a branch ruleset bypass list — mint an installation token in the
+workflow, hand it to `actions/checkout` (so `git push` is authenticated as the
+App), and override the commit identity:
+
+```yaml
+- name: Mint App token
+  id: app-token
+  uses: actions/create-github-app-token@v2
+  with:
+    app-id: ${{ secrets.DRIFT_FIXER_APP_ID }}
+    private-key: ${{ secrets.DRIFT_FIXER_APP_PRIVATE_KEY }}
+
+- uses: actions/checkout@v4
+  with:
+    token: ${{ steps.app-token.outputs.token }}   # so git push is authenticated as the App
+
+- uses: opentofu/setup-opentofu@v1
+
+- uses: mongodb-forks/drift-fixer@master
+  with:
+    path: ./infra
+    mode: commit
+    token: ${{ steps.app-token.outputs.token }}
+    git-user-name:  "${{ steps.app-token.outputs.app-slug }}[bot]"
+    git-user-email: "${{ steps.app-token.outputs.installation-id }}+${{ steps.app-token.outputs.app-slug }}[bot]@users.noreply.github.com"
+```
+
+The push is authenticated by whatever credentials `actions/checkout`
+persisted, so passing the App token there is what makes the bypass match
+work. The `git-user-name` / `git-user-email` inputs control how the commit
+is *displayed* — set them to the App's identity so commit listings show the
+App as author.
 
 ---
 

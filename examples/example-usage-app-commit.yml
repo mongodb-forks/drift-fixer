@@ -1,0 +1,53 @@
+name: Fix Terraform Drift (commit as GitHub App)
+
+# Example workflow for running drift-fixer in `commit` mode while pushing as
+# a GitHub App. Use this when the App needs to appear in a branch ruleset's
+# bypass list — the bypass-actor match is based on whoever is pushing, so
+# `git push` must be authenticated with an App installation token.
+#
+# Prerequisites:
+#   1. Create a GitHub App with permissions:
+#        - Contents:       Read & write
+#        - Metadata:       Read-only
+#      Install it on the repository (or org) you want to manage.
+#   2. Add the App to your branch ruleset's bypass list.
+#   3. Store the App's id and private key as repository (or org) secrets.
+
+on:
+  schedule:
+    - cron: "0 6 * * *"   # daily at 06:00 UTC
+  workflow_dispatch:
+
+jobs:
+  fix-drift:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read    # the App provides write; the workflow itself only reads
+
+    steps:
+      - name: Mint App installation token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.DRIFT_FIXER_APP_ID }}
+          private-key: ${{ secrets.DRIFT_FIXER_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v4
+        with:
+          # Authenticates `git push` as the App. This is the credential
+          # GitHub matches against the ruleset bypass list — passing the
+          # token to drift-fixer alone is NOT enough.
+          token: ${{ steps.app-token.outputs.token }}
+
+      - uses: opentofu/setup-opentofu@v1
+
+      - uses: mongodb-forks/drift-fixer@master
+        with:
+          path: ./infra
+          mode: commit
+          token: ${{ steps.app-token.outputs.token }}
+          # Make the commit appear authored by the App, not github-actions[bot].
+          git-user-name:  "${{ steps.app-token.outputs.app-slug }}[bot]"
+          git-user-email: "${{ steps.app-token.outputs.installation-id }}+${{ steps.app-token.outputs.app-slug }}[bot]@users.noreply.github.com"
+          # commit-message: "chore: sync infra drift"
+          # verbose: "true"
