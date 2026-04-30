@@ -143,7 +143,7 @@ runs:
         GH_TOKEN: ${{ inputs.token }}
       run: |
         git config user.name  "github-actions[bot]"
-        git config use-r.email "github-actions[bot]@users.noreply.github.com"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
         git add -A
         git commit -m "${{ inputs.commit-message }}"
         git push
