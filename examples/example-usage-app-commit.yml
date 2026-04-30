@@ -34,6 +34,10 @@ jobs:
 
       - uses: actions/checkout@v4
         with:
+          # Check out the actual branch (not the merge ref on PR events,
+          # not a detached SHA on schedule) so the commit step pushes a
+          # fast-forward to that branch.
+          ref: ${{ github.head_ref || github.ref_name }}
           # Authenticates `git push` as the App. This is the credential
           # GitHub matches against the ruleset bypass list — passing the
           # token to drift-fixer alone is NOT enough.

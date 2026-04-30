@@ -159,10 +159,7 @@ runs:
         git config user.email "${{ inputs.git-user-email }}"
         git add -A
         git commit -m "${{ inputs.commit-message }}"
-        # On pull_request events github.ref_name is a synthetic '<pr>/merge'
-        # ref, so use github.head_ref (the PR's source branch) instead.
-        BRANCH="${{ github.head_ref || github.ref_name }}"
-        git push origin "HEAD:refs/heads/${BRANCH}"
+        git push
 
     - name: Open pull request
       id: pr
