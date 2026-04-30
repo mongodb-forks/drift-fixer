@@ -159,7 +159,11 @@ runs:
         git config user.email "${{ inputs.git-user-email }}"
         git add -A
         git commit -m "${{ inputs.commit-message }}"
-        git push
+        # Push HEAD to the branch the workflow ran on. Required because
+        # actions/checkout typically leaves the repo at a detached HEAD
+        # (especially on schedule/workflow_dispatch), so a bare `git push`
+        # has no upstream to target.
+        git push origin "HEAD:${{ github.ref_name }}"
 
     - name: Open pull request
       id: pr
