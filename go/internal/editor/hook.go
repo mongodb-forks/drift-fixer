@@ -30,7 +30,18 @@ type CommentHook func(resourceType, resourceName, attrPath, value string) string
 func LoadCommentHook(verbose bool) CommentHook {
 	script := os.Getenv("DRIFT_FIXER_COMMENT_SCRIPT")
 	if script == "" {
+		if verbose {
+			fmt.Println("[hook] DRIFT_FIXER_COMMENT_SCRIPT is unset; comment hook disabled")
+		}
 		return nil
+	}
+	if verbose {
+		fmt.Printf("[hook] DRIFT_FIXER_COMMENT_SCRIPT=%s — comment hook enabled\n", script)
+		if info, err := os.Stat(script); err != nil {
+			fmt.Printf("[hook] WARNING: stat %s failed: %v (the hook will fire but every call will fail)\n", script, err)
+		} else if info.Mode()&0o111 == 0 {
+			fmt.Printf("[hook] WARNING: %s is not executable (mode %v) — exec will fail\n", script, info.Mode())
+		}
 	}
 	return func(resourceType, resourceName, attrPath, value string) string {
 		cmd := exec.Command(script)
@@ -40,14 +51,24 @@ func LoadCommentHook(verbose bool) CommentHook {
 			"DRIFT_ATTR_PATH="+attrPath,
 			"DRIFT_ATTR_VALUE="+value,
 		)
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
 		out, err := cmd.Output()
-		if err != nil {
-			if verbose {
-				fmt.Fprintf(os.Stderr, "[hook] script error for %s.%s=%s: %v\n",
-					attrPath, resourceType, value, err)
+		comment := strings.TrimSpace(string(out))
+		if verbose {
+			fmt.Printf("[hook] call %s.%s path=%s value=%s -> comment=%q\n",
+				resourceType, resourceName, attrPath, value, comment)
+			if s := strings.TrimSpace(stderr.String()); s != "" {
+				fmt.Printf("[hook]   script stderr: %s\n", s)
 			}
+		}
+		if err != nil {
+			// Always surface execution errors — silently swallowing is
+			// what made this hard to debug in the first place.
+			fmt.Fprintf(os.Stderr, "[hook] script failed for %s.%s path=%s value=%s: %v\n",
+				resourceType, resourceName, attrPath, value, err)
 			return ""
 		}
-		return strings.TrimSpace(string(out))
+		return comment
 	}
 }
