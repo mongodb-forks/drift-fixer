@@ -64,9 +64,15 @@ func LoadCommentHook(verbose bool) CommentHook {
 		}
 		if err != nil {
 			// Always surface execution errors — silently swallowing is
-			// what made this hard to debug in the first place.
-			fmt.Fprintf(os.Stderr, "[hook] script failed for %s.%s path=%s value=%s: %v\n",
+			// what made this hard to debug in the first place. Include
+			// the script's stderr so the user can see why it failed
+			// without needing to re-run with verbose on.
+			msg := fmt.Sprintf("[hook] script failed for %s.%s path=%s value=%s: %v",
 				resourceType, resourceName, attrPath, value, err)
+			if s := strings.TrimSpace(stderr.String()); s != "" {
+				msg += "\n[hook]   script stderr: " + s
+			}
+			fmt.Fprintln(os.Stderr, msg)
 			return ""
 		}
 		return comment
