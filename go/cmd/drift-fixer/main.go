@@ -10,6 +10,7 @@ import (
 	"github.com/trevor159/drift-fixer/internal/editor"
 	"github.com/trevor159/drift-fixer/internal/finder"
 	"github.com/trevor159/drift-fixer/internal/planner"
+	"github.com/trevor159/drift-fixer/internal/schema"
 )
 
 func main() {
@@ -57,6 +58,19 @@ func main() {
 		fatalf("could not find any .tf files containing the drifted resources")
 	}
 
+	// Provider schema tells the editor which collection attributes are sets
+	// (order-insensitive) vs lists (order-sensitive). Without it, every list
+	// is written in infra order — always correct, just noisier for sets.
+	var isSet editor.SetLookup
+	if !*dryRun {
+		sch, err := schema.Load(projectDir, *tfBin)
+		if err != nil {
+			fmt.Printf("⚠️  could not load provider schema; treating all collections as ordered lists: %v\n", err)
+		} else {
+			isSet = sch.IsSet
+		}
+	}
+
 	// Build address → drift lookup
 	driftByAddr := make(map[string]planner.ResourceDrift, len(drifts))
 	for _, d := range drifts {
@@ -97,7 +111,7 @@ func main() {
 			}
 			// Pass 1: write the fix without comments so the script can read
 			// the updated file for context in pass 2.
-			changed, err := editor.ApplyDrift(filePath, d.ResourceType, d.ResourceName, d.DriftedAttrs, *verbose, nil, repoIDs)
+			changed, err := editor.ApplyDrift(filePath, d.ResourceType, d.ResourceName, d.DriftedAttrs, *verbose, nil, repoIDs, isSet)
 			if err != nil {
 				fmt.Printf("  ❌ %s: %v\n", addr, err)
 				allFixed = false
@@ -105,7 +119,7 @@ func main() {
 			}
 			// Pass 2: apply script-generated comments (file already written).
 			if scriptHook != nil {
-				_, err = editor.ApplyDrift(filePath, d.ResourceType, d.ResourceName, d.DriftedAttrs, *verbose, scriptHook, repoIDs)
+				_, err = editor.ApplyDrift(filePath, d.ResourceType, d.ResourceName, d.DriftedAttrs, *verbose, scriptHook, repoIDs, isSet)
 				if err != nil {
 					fmt.Printf("  ❌ %s (comment pass): %v\n", addr, err)
 				}
