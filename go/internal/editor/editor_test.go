@@ -16,7 +16,7 @@ func applyDriftToString(t *testing.T, inputHCL string, rType, rName string, drif
 	if err := os.WriteFile(path, []byte(inputHCL), 0644); err != nil {
 		t.Fatalf("write temp file: %v", err)
 	}
-	_, err := ApplyDrift(path, rType, rName, drifted, false, nil, nil)
+	_, err := ApplyDrift(path, rType, rName, drifted, false, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("ApplyDrift: %v", err)
 	}
@@ -532,7 +532,7 @@ resource "example_resource" "r" {
 	_, err := ApplyDrift(fpath, "example_resource", "r", map[string]interface{}{
 		"name": "new",
 		"tags": []interface{}{"a", "b"},
-	}, false, hook, nil)
+	}, false, hook, nil, nil)
 	if err != nil {
 		t.Fatalf("ApplyDrift: %v", err)
 	}
@@ -659,7 +659,7 @@ resource "github_actions_organization_permissions" "_10gen" {
 				},
 			},
 		},
-		false, nil, repoIDs)
+		false, nil, repoIDs, repositoryIDsIsSet)
 	if err != nil {
 		t.Fatalf("ApplyDrift: %v", err)
 	}
@@ -725,7 +725,7 @@ resource "github_actions_organization_permissions" "_10gen" {
 				},
 			},
 		},
-		false, nil, repoIDs)
+		false, nil, repoIDs, repositoryIDsIsSet)
 	if err != nil {
 		t.Fatalf("ApplyDrift: %v", err)
 	}
@@ -745,5 +745,172 @@ resource "github_actions_organization_permissions" "_10gen" {
 	if !(mmsIdx < mongoIdx && mongoIdx < newRepoIdx && newRepoIdx < id1Idx && id1Idx < id2Idx) {
 		t.Errorf("wrong order — want mms < mongo < new_repo < 1111111 < 2222222, got indices %d %d %d %d %d\n%s",
 			mmsIdx, mongoIdx, newRepoIdx, id1Idx, id2Idx, s)
+	}
+}
+
+// repositoryIDsIsSet mirrors the integrations/github provider schema, where
+// github_actions_organization_permissions.enabled_repositories_config.repository_ids
+// is a TypeSet.
+func repositoryIDsIsSet(rType, path string) bool {
+	return rType == "github_actions_organization_permissions" &&
+		path == "enabled_repositories_config.repository_ids"
+}
+
+// listItemsInOrder returns the repo IDs / data-source names in the written list, in
+// order, so tests can assert the exact sequence.
+func listItemsInOrder(t *testing.T, s, attr string) []string {
+	t.Helper()
+	start := strings.Index(s, attr+" = [")
+	if start < 0 {
+		t.Fatalf("attribute %s not found in:\n%s", attr, s)
+	}
+	end := strings.Index(s[start:], "]")
+	var items []string
+	for _, line := range strings.Split(s[start+len(attr)+4:start+end], "\n") {
+		line = strings.TrimSpace(line)
+		if i := strings.Index(line, "#"); i >= 0 {
+			line = strings.TrimSpace(line[:i])
+		}
+		line = strings.TrimSuffix(line, ",")
+		if line != "" {
+			items = append(items, line)
+		}
+	}
+	return items
+}
+
+// TestOrderedListWrittenInInfraOrder is a regression test for the
+// github_organization_ruleset conditions.repository_id drift that never
+// converged (10gen/repo-configs runs Oct 28 – Nov 4 2026). repository_id is a
+// TypeList, so order matters: infra had [bcm, mms, 264223347] while config had
+// [mms, bcm]. The fixer used to keep config order and append the new ID,
+// producing [mms, bcm, 264223347], which still differed from infra and failed
+// validation. Lists must be written in exact infra order, still preferring
+// existing data source references.
+func TestOrderedListWrittenInInfraOrder(t *testing.T) {
+	input := `
+resource "github_organization_ruleset" "commit_watcher" {
+  conditions {
+    repository_id = [
+      data.github_repository.mms.repo_id,
+      data.github_repository.billing_change_manager.repo_id,
+    ]
+    ref_name {
+      exclude = []
+      include = ["~DEFAULT_BRANCH"]
+    }
+  }
+}
+`
+	repoIDs := map[string]string{
+		"204896":    "mms",
+		"905315126": "billing_change_manager",
+	}
+	dir := t.TempDir()
+	fpath := filepath.Join(dir, "main.tf")
+	_ = os.WriteFile(fpath, []byte(input), 0644)
+
+	_, err := ApplyDrift(fpath, "github_organization_ruleset", "commit_watcher",
+		map[string]interface{}{
+			"conditions": map[string]interface{}{
+				"repository_id": []interface{}{
+					float64(905315126),
+					float64(204896),
+					float64(264223347),
+				},
+			},
+		},
+		false, nil, repoIDs, repositoryIDsIsSet)
+	if err != nil {
+		t.Fatalf("ApplyDrift: %v", err)
+	}
+	outBytes, _ := os.ReadFile(fpath)
+	s := string(outBytes)
+
+	got := listItemsInOrder(t, s, "repository_id")
+	want := []string{
+		"data.github_repository.billing_change_manager.repo_id",
+		"data.github_repository.mms.repo_id",
+		"264223347",
+	}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("repository_id order:\n got  %v\n want %v\nfile:\n%s", got, want, s)
+	}
+}
+
+// TestOrderedListWithoutSchemaUsesInfraOrder checks the fallback: when no
+// schema info is available (nil SetLookup), every list is treated as ordered
+// and written in infra order, which is always valid.
+func TestOrderedListWithoutSchemaUsesInfraOrder(t *testing.T) {
+	input := `
+resource "github_actions_organization_permissions" "_10gen" {
+  enabled_repositories_config {
+    repository_ids = [
+      data.github_repository.mms.repo_id,
+      data.github_repository.mongo.repo_id,
+    ]
+  }
+}
+`
+	repoIDs := map[string]string{"204896": "mms", "3473720": "mongo"}
+	dir := t.TempDir()
+	fpath := filepath.Join(dir, "main.tf")
+	_ = os.WriteFile(fpath, []byte(input), 0644)
+
+	_, err := ApplyDrift(fpath, "github_actions_organization_permissions", "_10gen",
+		map[string]interface{}{
+			"enabled_repositories_config": map[string]interface{}{
+				"repository_ids": []interface{}{float64(3473720), float64(204896), float64(1111111)},
+			},
+		},
+		false, nil, repoIDs, nil)
+	if err != nil {
+		t.Fatalf("ApplyDrift: %v", err)
+	}
+	outBytes, _ := os.ReadFile(fpath)
+	s := string(outBytes)
+
+	got := listItemsInOrder(t, s, "repository_ids")
+	want := []string{
+		"data.github_repository.mongo.repo_id",
+		"data.github_repository.mms.repo_id",
+		"1111111",
+	}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("repository_ids order:\n got  %v\n want %v\nfile:\n%s", got, want, s)
+	}
+}
+
+// TestSetKeepsConfigOrderWithoutRepoIDs: stable ordering for sets must not
+// depend on repo-ID context being present (it used to be gated on it).
+func TestSetKeepsConfigOrderWithoutRepoIDs(t *testing.T) {
+	input := `
+resource "github_actions_organization_permissions" "_10gen" {
+  enabled_repositories_config {
+    repository_ids = [
+      300,
+      100,
+    ]
+  }
+}
+`
+	dir := t.TempDir()
+	fpath := filepath.Join(dir, "main.tf")
+	_ = os.WriteFile(fpath, []byte(input), 0644)
+
+	_, err := ApplyDrift(fpath, "github_actions_organization_permissions", "_10gen",
+		map[string]interface{}{
+			"enabled_repositories_config": map[string]interface{}{
+				"repository_ids": []interface{}{float64(100), float64(200), float64(300)},
+			},
+		},
+		false, nil, nil, repositoryIDsIsSet)
+	if err != nil {
+		t.Fatalf("ApplyDrift: %v", err)
+	}
+	outBytes, _ := os.ReadFile(fpath)
+	got := listItemsInOrder(t, string(outBytes), "repository_ids")
+	if strings.Join(got, "|") != "300|100|200" {
+		t.Errorf("want config order kept with new item appended (300|100|200), got %v", got)
 	}
 }
