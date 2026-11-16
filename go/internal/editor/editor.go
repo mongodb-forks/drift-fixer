@@ -77,7 +77,14 @@ type syncCtx struct {
 	filePath string            // absolute path of the .tf file being edited
 	hook     CommentHook       // may be nil
 	repoIDs  map[string]string // decimal repo ID → data source name, from plan prior_state
+	isSet    SetLookup         // may be nil; nil means every collection is treated as an ordered list
 }
+
+// SetLookup reports whether the attribute at the dot-separated path (e.g.
+// "conditions.repository_id") on resourceType is a set in the provider
+// schema. Sets are order-insensitive, so the editor may keep config order to
+// avoid churn; lists are order-sensitive and must be written in infra order.
+type SetLookup func(resourceType, path string) bool
 
 // ApplyDrift reads filePath, applies the drifted attribute values for the
 // resource identified by (resourceType, resourceName), and writes it back.
@@ -85,7 +92,9 @@ type syncCtx struct {
 // "204896" → "mms") so that existing data.github_repository.* reference
 // expressions in repository_ids lists are preserved instead of being
 // replaced with bare integers. Pass nil if not applicable.
-func ApplyDrift(filePath, resourceType, resourceName string, driftedAttrs map[string]interface{}, verbose bool, hook CommentHook, repoIDs map[string]string) (bool, error) {
+// isSet tells the editor which collection attributes are sets; only those
+// keep their existing config order. Pass nil to treat all as ordered lists.
+func ApplyDrift(filePath, resourceType, resourceName string, driftedAttrs map[string]interface{}, verbose bool, hook CommentHook, repoIDs map[string]string, isSet SetLookup) (bool, error) {
 	src, err := os.ReadFile(filePath)
 	if err != nil {
 		return false, fmt.Errorf("read %s: %w", filePath, err)
@@ -101,7 +110,7 @@ func ApplyDrift(filePath, resourceType, resourceName string, driftedAttrs map[st
 		return false, fmt.Errorf("resource %q %q not found in %s", resourceType, resourceName, filePath)
 	}
 
-	ctx := syncCtx{verbose: verbose, rType: resourceType, rName: resourceName, filePath: filePath, hook: hook, repoIDs: repoIDs}
+	ctx := syncCtx{verbose: verbose, rType: resourceType, rName: resourceName, filePath: filePath, hook: hook, repoIDs: repoIDs, isSet: isSet}
 	changed := syncBody(resourceBlock.Body(), driftedAttrs, ctx, "  ", "")
 	if !changed {
 		return false, nil
@@ -227,12 +236,13 @@ func syncBody(body *hclwrite.Body, attrs map[string]interface{}, ctx syncCtx, in
 			}
 		} else {
 			// Scalar attribute.
-			if err := setAttributeVal(body, key, val, ctx, childPath); err != nil {
+			written, err := setAttributeVal(body, key, val, ctx, childPath)
+			if err != nil {
 				fmt.Printf("%s[warn] skip %s: %v\n", indent, key, err)
 				continue
 			}
 			if ctx.verbose {
-				fmt.Printf("%s[attr] set %s = %v\n", indent, key, val)
+				fmt.Printf("%s[attr] set %s = %v\n", indent, key, written)
 			}
 			changed = true
 		}
@@ -411,27 +421,31 @@ func resolveItemToID(item string, nameToID map[string]string) string {
 // setAttributeVal sets a scalar attribute on body. Lists with more than one
 // item are formatted one-item-per-line; everything else uses SetAttributeValue.
 // Existing comments are preserved; the hook (if set) provides comments for new values.
-func setAttributeVal(body *hclwrite.Body, key string, val interface{}, ctx syncCtx, path string) error {
+// Returns the value actually written (lists may be reordered).
+func setAttributeVal(body *hclwrite.Body, key string, val interface{}, ctx syncCtx, path string) (interface{}, error) {
 	if lst, ok := val.([]interface{}); ok && len(lst) > 1 {
 		comments := extractItemComments(body, key)
 		existingItems := extractListItemTexts(body, key)
 		preferredRefs := buildPreferredRefs(existingItems, ctx.repoIDs)
-		// When we have repo ID context, apply stable ordering: keep existing
-		// config items in their original order, then append new infra items.
-		// This prevents churn from infra returning items in a different order.
-		if len(ctx.repoIDs) > 0 {
+		// For sets only, apply stable ordering: keep existing config items in
+		// their original order, then append new infra items. This prevents
+		// churn from infra returning set members in a different order. Lists
+		// are order-sensitive, so they must be written exactly in infra order
+		// or the validation plan will still report drift.
+		if ctx.isSet != nil && ctx.isSet(ctx.rType, path) {
 			lst = stableMergeList(lst, existingItems, ctx.repoIDs)
 		}
 		toks, err := multilineListTokens(lst, comments, preferredRefs, ctx, path)
 		if err == nil {
 			body.SetAttributeRaw(key, toks)
-			return nil
+			return lst, nil
 		}
+		val = lst
 		// Fall through to SetAttributeValue on error
 	}
 	ctyVal, err := toCty(val)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// For scalar (non-list) attributes, ask the hook for a comment.
 	if ctx.hook != nil {
@@ -444,11 +458,11 @@ func setAttributeVal(body *hclwrite.Body, key string, val interface{}, ctx syncC
 			body.SetAttributeRaw(key, append(valToks,
 				&hclwrite.Token{Type: hclsyntax.TokenComment, Bytes: []byte(" # " + comment + "\n")},
 			))
-			return nil
+			return val, nil
 		}
 	}
 	body.SetAttributeValue(key, ctyVal)
-	return nil
+	return val, nil
 }
 
 // multilineListTokens builds tokens for a multi-line list of any scalar type:
